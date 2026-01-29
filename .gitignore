@@ -1,0 +1,8 @@
+.DS_Store
+bk_*
+
+.env
+__pycache__
+venv
+bot.log
+tmp/slack_tmux_bridge.pid

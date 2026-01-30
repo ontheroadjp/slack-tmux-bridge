@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
+AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 
 # Load environment variables
 load_dotenv(DOTENV_PATH)
@@ -58,6 +59,15 @@ def get_tmux_pane_id():
         print(f"Error getting tmux info: {e}")
         sys.exit(1)
 
+def get_tmux_pane_cwd(tmux_target):
+    try:
+        cmd = ["tmux", "display-message", "-p", "-t", tmux_target, "#{pane_current_path}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error getting tmux pane path: {e}")
+        sys.exit(1)
+
 
 def _get_slack_client():
     if not SLACK_BOT_TOKEN:
@@ -76,11 +86,15 @@ def send_slack_message(channel, text):
 def _find_channel_by_name(client, name):
     cursor = None
     while True:
-        resp = client.conversations_list(
-            limit=1000,
-            cursor=cursor,
-            types="public_channel,private_channel"
-        )
+        try:
+            resp = client.conversations_list(
+                limit=1000,
+                cursor=cursor,
+                types="public_channel,private_channel"
+            )
+        except Exception as e:
+            print(f"⚠️ Warning: Slack API call failed while listing channels: {e}")
+            return None
         for ch in resp.get("channels", []):
             if ch.get("name") == name:
                 return ch
@@ -161,6 +175,70 @@ def _extract_pane(value):
         return value.get("pane")
     return value
 
+def _rr_state_path():
+    base_dir = os.path.dirname(ACTIVE_SESSIONS_FILE)
+    return os.path.join(base_dir, "tmp", "ai_studio_rr.json")
+
+def _load_rr_state():
+    data = load_json(_rr_state_path())
+    if not isinstance(data, dict):
+        return {"last_index": -1}
+    return {"last_index": int(data.get("last_index", -1))}
+
+def _save_rr_state(last_index: int):
+    save_json(_rr_state_path(), {"last_index": last_index})
+
+def _select_fallback_channel(active_sessions):
+    used = set()
+    for value in active_sessions.values():
+        if isinstance(value, dict):
+            name = value.get("name")
+            if name:
+                used.add(name)
+
+    # Prefer first free slot
+    for name in AI_STUDIO_CHANNELS:
+        if name not in used:
+            _save_rr_state(AI_STUDIO_CHANNELS.index(name))
+            return name
+
+    # All occupied (or unknown) -> round robin
+    state = _load_rr_state()
+    last_index = state.get("last_index", -1)
+    next_index = (last_index + 1) % len(AI_STUDIO_CHANNELS)
+    _save_rr_state(next_index)
+    return AI_STUDIO_CHANNELS[next_index]
+
+def _resolve_channel(client, dir_name, active_sessions):
+    channel = _find_channel_by_name(client, dir_name)
+    if channel:
+        return channel
+    fallback = _select_fallback_channel(active_sessions)
+    if fallback:
+        channel = _find_channel_by_name(client, fallback)
+        if channel:
+            return channel
+    for name in AI_STUDIO_CHANNELS:
+        if name == fallback:
+            continue
+        channel = _find_channel_by_name(client, name)
+        if channel:
+            return channel
+    return None
+
+def _register_session(target_channel, target_channel_name, pane_id, cwd):
+    active_sessions = load_json(ACTIVE_SESSIONS_FILE)
+    duplicates = [
+        ch
+        for ch, pane in active_sessions.items()
+        if _extract_pane(pane) == pane_id and ch != target_channel
+    ]
+    for dup in duplicates:
+        del active_sessions[dup]
+
+    active_sessions[target_channel] = {"pane": pane_id, "dir": cwd, "name": target_channel_name}
+    save_json(ACTIVE_SESSIONS_FILE, active_sessions)
+
 def main():
     parser = argparse.ArgumentParser(description="Slack tmux bridge session helper")
     subparsers = parser.add_subparsers(dest="command")
@@ -169,6 +247,7 @@ def main():
 
     rm_parser = subparsers.add_parser("rm", help="Remove a session by number")
     rm_parser.add_argument("number", type=int, help="Session number from list")
+    parser.add_argument("--add", metavar="PANE", help="Register a target tmux pane (e.g., 1:2.0)")
 
     args = parser.parse_args()
 
@@ -179,18 +258,18 @@ def main():
         remove_sessions_by_number(args.number)
         return
 
-    # 1. Get current directory
-    cwd = os.getcwd()
+    # 1. Get current directory (or target pane directory)
+    if args.add:
+        pane_id = args.add
+        cwd = get_tmux_pane_cwd(pane_id)
+    else:
+        cwd = os.getcwd()
+    active_sessions = load_json(ACTIVE_SESSIONS_FILE)
 
     # 2. Resolve channel ID by current directory name
     client = _get_slack_client()
     dir_name = os.path.basename(cwd)
-    channel = _find_channel_by_name(client, dir_name)
-    if not channel:
-        for fallback in ["ai-studio-01", "ai-studio-02", "ai-studio-03"]:
-            channel = _find_channel_by_name(client, fallback)
-            if channel:
-                break
+    channel = _resolve_channel(client, dir_name, active_sessions)
 
     if not channel:
         print("❌ Error: No channel matched this directory name.")
@@ -203,23 +282,11 @@ def main():
     target_channel_name = channel.get("name")
         
     # 4. Get Tmux Pane ID
-    pane_id = get_tmux_pane_id()
+    if not args.add:
+        pane_id = get_tmux_pane_id()
     
     # 5. Update active sessions
-    active_sessions = load_json(ACTIVE_SESSIONS_FILE)
-    # Remove any other channels pointing to the same tmux pane
-    duplicates = [
-        ch
-        for ch, pane in active_sessions.items()
-        if _extract_pane(pane) == pane_id and ch != target_channel
-    ]
-    for dup in duplicates:
-        del active_sessions[dup]
-    
-    # Map Channel -> Pane
-    active_sessions[target_channel] = {"pane": pane_id, "dir": cwd, "name": target_channel_name}
-    
-    save_json(ACTIVE_SESSIONS_FILE, active_sessions)
+    _register_session(target_channel, target_channel_name, pane_id, cwd)
     
     # 6. Send Slack Notification
     send_slack_message(

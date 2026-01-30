@@ -46,6 +46,8 @@ EVENT_HEALTH_NOTIFY = os.environ.get("EVENT_HEALTH_NOTIFY", "0") == "1"
 EVENT_HEALTH_NOTIFY_COOLDOWN_SEC = int(os.environ.get("EVENT_HEALTH_NOTIFY_COOLDOWN_SEC", "600"))
 PROMPT_CACHE_TTL_SEC = int(os.environ.get("PROMPT_CACHE_TTL_SEC", "3600"))
 SNAPSHOT_TTL_SEC = int(os.environ.get("SNAPSHOT_TTL_SEC", "86400"))
+CHANNEL_IDLE_NOTIFY_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_SEC", "1800"))
+CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC", "1800"))
 
 # =====================
 # logging & utility
@@ -185,6 +187,17 @@ def _normalize_tmux_target(value):
 logger = logging.getLogger("slack_tmux_bridge")
 app = App(token=SLACK_BOT_TOKEN, logger=logger)
 
+def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None):
+    try:
+        kwargs = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        if blocks:
+            kwargs["blocks"] = blocks
+        app.client.chat_postMessage(**kwargs)
+    except Exception as e:
+        log(f"⚠️ Slack post failed: {e}")
+
 # =====================
 # Slack: inbound logging
 # =====================
@@ -228,7 +241,7 @@ def send_text_to_tmux(tmux_target: str, text: str, thread_ts: str = None, channe
         err_msg = f"⚠️ Error in send_text_to_tmux:\n{r.stderr}"
         log(err_msg)
         if thread_ts and channel_id:
-            app.client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=err_msg)
+            _post_message(channel_id, err_msg, thread_ts=thread_ts)
 
 def send_enter(tmux_target: str, thread_ts: str = None, channel_id: str = None):
     # 実際のEnter送信
@@ -239,7 +252,7 @@ def send_enter(tmux_target: str, thread_ts: str = None, channel_id: str = None):
         err_msg = f"⚠️ Error in send_enter:\n{r.stderr}"
         log(err_msg)
         if thread_ts and channel_id:
-            app.client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=err_msg)
+            _post_message(channel_id, err_msg, thread_ts=thread_ts)
 
 def capture_tmux(tmux_target: str, lines=None):
     args = ["-p", "-S", "-1000"] if lines else ["-p"]
@@ -255,7 +268,11 @@ PROMPT_CACHE_TS = {}  # thread_ts -> last_seen_epoch
 LAST_EVENT_TS = time.time()
 LAST_EVENT_TS_BY_CHANNEL = {}
 LAST_HEALTH_NOTIFY_TS_BY_CHANNEL = {}
+LAST_IDLE_NOTIFY_TS_BY_CHANNEL = {}
 LAST_RESTART_TS = 0.0
+ACTIVE_MONITORS_BY_CHANNEL = {}
+ACTIVE_MONITORS_BY_THREAD = {}
+ACTIVE_MONITOR_LOCK = threading.Lock()
 
 def get_snapshot_path(thread_ts: str) -> str:
     return os.path.join(TMP_DIR, f"snapshot_{thread_ts}.txt")
@@ -321,6 +338,22 @@ def _format_age(seconds: float) -> str:
         return f"{int(seconds // 60)}m"
     return f"{int(seconds // 3600)}h"
 
+def _build_sessions_output():
+    sessions = _load_active_sessions()
+    if not sessions:
+        return "(no active sessions)"
+
+    lines = []
+    for channel_id, value in sessions.items():
+        if isinstance(value, dict):
+            target_dir = value.get("dir") or "-"
+            channel_name = value.get("name") or channel_id
+        else:
+            target_dir = "-"
+            channel_name = channel_id
+        lines.append(f"- {channel_name} → {target_dir}")
+    return "\n".join(lines)
+
 def _extract_new_output(initial_clean: str, current_clean: str) -> str:
     if OUTPUT_DIFF_MODE == "suffix":
         if current_clean.startswith(initial_clean):
@@ -352,6 +385,47 @@ def _cleanup_snapshots():
         except Exception:
             continue
 
+def _select_primary_channel(entries):
+    def _score(entry):
+        channel_id, value = entry
+        last_ts = LAST_EVENT_TS_BY_CHANNEL.get(channel_id, 0)
+        name = value.get("name") if isinstance(value, dict) else None
+        return (last_ts, 1 if name else 0, channel_id)
+    return max(entries, key=_score)
+
+def _dedupe_active_sessions():
+    sessions = _load_active_sessions()
+    if not sessions:
+        return
+
+    pane_map = {}
+    for channel_id, value in sessions.items():
+        pane = _normalize_tmux_target(value)
+        if not pane:
+            continue
+        pane_map.setdefault(pane, []).append((channel_id, value))
+
+    updated = False
+    for pane, entries in pane_map.items():
+        if len(entries) <= 1:
+            continue
+        keep_channel_id, keep_value = _select_primary_channel(entries)
+        keep_name = keep_value.get("name") if isinstance(keep_value, dict) else None
+        target_label = f"#{keep_name}" if keep_name else keep_channel_id
+
+        for channel_id, _ in entries:
+            if channel_id == keep_channel_id:
+                continue
+            sessions.pop(channel_id, None)
+            updated = True
+            _post_message(
+                channel_id,
+                f"⚠️ 同じ tmux ペインが他チャンネルと重複していたため、このチャンネルの接続を解除しました。今後は {target_label} で通信してください。"
+            )
+
+    if updated:
+        _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+
 def _maintenance_worker():
     while True:
         time.sleep(60)
@@ -362,6 +436,8 @@ def _maintenance_worker():
                 _cleanup_prompt_cache(key)
         # prune old snapshots
         _cleanup_snapshots()
+        # prune duplicate channel mappings
+        _dedupe_active_sessions()
 
 def _event_health_worker():
     global LAST_RESTART_TS
@@ -391,9 +467,24 @@ def _event_health_worker():
                 if now - last_notify < EVENT_HEALTH_NOTIFY_COOLDOWN_SEC:
                     continue
                 LAST_HEALTH_NOTIFY_TS_BY_CHANNEL[channel_id] = now
-                app.client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"⚠️ {EVENT_HEALTH_TIMEOUT}秒以上イベントを受信していません。接続を確認してください。"
+                _post_message(
+                    channel_id,
+                    f"⚠️ {EVENT_HEALTH_TIMEOUT}秒以上イベントを受信していません。接続を確認してください。"
+                )
+
+        if CHANNEL_IDLE_NOTIFY_SEC > 0:
+            sessions = _load_active_sessions()
+            for channel_id in sessions.keys():
+                last_ts = LAST_EVENT_TS_BY_CHANNEL.get(channel_id, 0)
+                if last_ts == 0 or now - last_ts < CHANNEL_IDLE_NOTIFY_SEC:
+                    continue
+                last_notify = LAST_IDLE_NOTIFY_TS_BY_CHANNEL.get(channel_id, 0)
+                if now - last_notify < CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC:
+                    continue
+                LAST_IDLE_NOTIFY_TS_BY_CHANNEL[channel_id] = now
+                _post_message(
+                    channel_id,
+                    "📡 こちらは待機中です。必要があれば声をかけてください。"
                 )
 
 # =====================
@@ -401,6 +492,9 @@ def _event_health_worker():
 # =====================
 def monitor_and_reply(thread_ts, channel_id, tmux_target, initial_content, prompt=""):
     log(f"Starting monitor thread for {thread_ts} (Target: {tmux_target}, Prompt: {prompt})...")
+    with ACTIVE_MONITOR_LOCK:
+        ACTIVE_MONITORS_BY_THREAD[thread_ts] = True
+        ACTIVE_MONITORS_BY_CHANNEL[channel_id] = ACTIVE_MONITORS_BY_CHANNEL.get(channel_id, 0) + 1
     
     # スナップショットを保存しておく（継続用）
     save_snapshot(thread_ts, initial_content, prompt)
@@ -411,287 +505,282 @@ def monitor_and_reply(thread_ts, channel_id, tmux_target, initial_content, promp
     
     stable_count = 0
     max_wait_cycles = 60
-    
-    for _ in range(max_wait_cycles):
-        time.sleep(1.0)
-        
-        raw_content = capture_tmux(tmux_target, lines=True)
-        current_clean = strip_ansi(raw_content)
-        
-        if current_clean == last_clean:
-            stable_count += 1
-        else:
-            stable_count = 0
-            last_clean = current_clean
-        
-        # 変化があったか？
-        is_changed = (current_clean.strip() != initial_clean.strip())
-        
-        # 1. Allow once を検知した場合、または出力が安定した場合に応答
-        last_lines = "\n".join(current_clean.strip().splitlines()[-10:])
-        
-        if is_changed and ("1. Allow once" in last_lines or stable_count >= 2):
-            log("Output stabilized or permission prompt detected. Sending to Slack.")
+    try:
+        for _ in range(max_wait_cycles):
+            time.sleep(1.0)
             
-            # --- 回答抽出ロジックの厳格化 ---
-            # 実行開始時の画面を削った後の新テキスト
-            msg_text = _extract_new_output(initial_clean, current_clean)
+            raw_content = capture_tmux(tmux_target, lines=True)
+            current_clean = strip_ansi(raw_content)
             
-            # マーカー ("> [prompt]") を探し、それより前のスプラッシュ等はすべて捨てる
-            found_marker = False
-            if prompt:
-                marker = f"> {prompt}"
-                marker_idx = msg_text.find(marker)
-                if marker_idx == -1:
-                    marker_idx = msg_text.find(f">{prompt}")
-                
-                if marker_idx != -1:
-                    msg_text = msg_text[marker_idx:].strip()
-                    found_marker = True
-            
-            # マーカーが見つからない場合でも、最古の ">" 行を探してそれ以前を捨てる
-            if not found_marker:
-                lines = msg_text.splitlines()
-                for i, line in enumerate(lines):
-                    if line.strip().startswith(">"):
-                        msg_text = "\n".join(lines[i:]).strip()
-                        found_marker = True
-                        break
-
-            # 整形: "> プロンプト" の後ろに空行を入れる
-            if msg_text.startswith(">"):
-                split_idx = msg_text.find("\n")
-                if split_idx != -1:
-                    header = msg_text[:split_idx]
-                    body = msg_text[split_idx:].strip()
-                    msg_text = f"{header}\n\n{body}"
-
-            if not msg_text:
-                msg_text = "(No new output detected)"
-
-            # 長文対策: 3000文字を超える場合は分割して送信
-            chunk_size = 3000
-            if len(msg_text) <= chunk_size:
-                # スマホ対策：長い区切り線を短縮
-                msg_text = re.sub(r"(-{20,})", "-" * 20, msg_text)
-                msg_text = re.sub(r"(={20,})", "=" * 20, msg_text)
-                msg_text = re.sub(r"(─{20,})", "─" * 20, msg_text)
-                msg_text = re.sub(r"(═{20,})", "═" * 20, msg_text)
-                
-                app.client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text="```\n" + msg_text + "\n```"
-                )
+            if current_clean == last_clean:
+                stable_count += 1
             else:
-                # 分割送信
-                for i in range(0, len(msg_text), chunk_size):
-                    chunk = msg_text[i:i + chunk_size]
-                    # 区切り線短縮
-                    chunk = re.sub(r"(-{20,})", "-" * 20, chunk)
-                    chunk = re.sub(r"(={20,})", "=" * 20, chunk)
-                    chunk = re.sub(r"(─{20,})", "─" * 20, chunk)
-                    chunk = re.sub(r"(═{20,})", "═" * 20, chunk)
-                    
-                    app.client.chat_postMessage(
-                        channel=channel_id,
-                        thread_ts=thread_ts,
-                        text="```\n" + chunk + "\n```"
-                    )
+                stable_count = 0
+                last_clean = current_clean
             
-            # 成功したのでスナップショット削除
-            delete_snapshot(thread_ts)
-            _cleanup_prompt_cache(thread_ts)
-            return
+            # 変化があったか？
+            is_changed = (current_clean.strip() != initial_clean.strip())
+            
+            # 1. Allow once を検知した場合、または出力が安定した場合に応答
+            last_lines = "\n".join(current_clean.strip().splitlines()[-10:])
+            
+            if (is_changed and "1. Allow once" in last_lines) or stable_count >= 3:
+                log("Output stabilized or permission prompt detected. Sending to Slack.")
+                
+                # --- 回答抽出ロジックの厳格化 ---
+                # 実行開始時の画面を削った後の新テキスト（変化が無い場合は現時点の画面を返す）
+                if is_changed:
+                    msg_text = _extract_new_output(initial_clean, current_clean)
+                else:
+                    msg_text = current_clean.strip()
+                    
+                # マーカー ("> [prompt]") を探し、それより前のスプラッシュ等はすべて捨てる
+                found_marker = False
+                if prompt:
+                    marker = f"> {prompt}"
+                    marker_idx = msg_text.find(marker)
+                    if marker_idx == -1:
+                        marker_idx = msg_text.find(f">{prompt}")
+                    
+                    if marker_idx != -1:
+                        msg_text = msg_text[marker_idx:].strip()
+                        found_marker = True
+                
+                # マーカーが見つからない場合でも、最古の ">" 行を探してそれ以前を捨てる
+                if not found_marker:
+                    lines = msg_text.splitlines()
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith(">"):
+                            msg_text = "\n".join(lines[i:]).strip()
+                            found_marker = True
+                            break
 
-    log("Monitor timed out.")
-    
-    # タイムアウト時は途中経過を送らず、継続確認ボタンのみを表示する
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text="⚠️ タイムアウトしました（処理継続中）。",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "⚠️ *タイムアウトしました（60秒経過）。*\nまだ処理中の可能性があります。監視を継続する場合は下のボタンを押してください。"
-                }
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "🔄 監視を継続"
-                        },
-                        "action_id": "continue_monitor"
+                # 整形: "> プロンプト" の後ろに空行を入れる
+                if msg_text.startswith(">"):
+                    split_idx = msg_text.find("\n")
+                    if split_idx != -1:
+                        header = msg_text[:split_idx]
+                        body = msg_text[split_idx:].strip()
+                        msg_text = f"{header}\n\n{body}"
+
+                if not msg_text:
+                    msg_text = "(No new output detected)"
+
+                # 長文対策: 3000文字を超える場合は分割して送信
+                chunk_size = 3000
+                if len(msg_text) <= chunk_size:
+                    # スマホ対策：長い区切り線を短縮
+                    msg_text = re.sub(r"(-{20,})", "-" * 20, msg_text)
+                    msg_text = re.sub(r"(={20,})", "=" * 20, msg_text)
+                    msg_text = re.sub(r"(─{20,})", "─" * 20, msg_text)
+                    msg_text = re.sub(r"(═{20,})", "═" * 20, msg_text)
+                    
+                    _post_message(
+                        channel_id,
+                        "```\n" + msg_text + "\n```",
+                        thread_ts=thread_ts
+                    )
+                else:
+                    # 分割送信
+                    for i in range(0, len(msg_text), chunk_size):
+                        chunk = msg_text[i:i + chunk_size]
+                        # 区切り線短縮
+                        chunk = re.sub(r"(-{20,})", "-" * 20, chunk)
+                        chunk = re.sub(r"(={20,})", "=" * 20, chunk)
+                        chunk = re.sub(r"(─{20,})", "─" * 20, chunk)
+                        chunk = re.sub(r"(═{20,})", "═" * 20, chunk)
+                        
+                        _post_message(
+                            channel_id,
+                            "```\n" + chunk + "\n```",
+                            thread_ts=thread_ts
+                        )
+                
+                # 成功したのでスナップショット削除
+                delete_snapshot(thread_ts)
+                _cleanup_prompt_cache(thread_ts)
+                return
+
+        log("Monitor timed out.")
+        
+        # タイムアウト時は途中経過を送らず、継続確認ボタンのみを表示する
+        _post_message(
+            channel_id,
+            "⚠️ タイムアウトしました（処理継続中）。",
+            thread_ts=thread_ts,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "⚠️ *タイムアウトしました（60秒経過）。*\nまだ処理中の可能性があります。監視を継続する場合は下のボタンを押してください。"
                     }
-                ]
-            }
-        ]
-    )
-    # タイムアウト時はスナップショットを削除せず残す
-    _cleanup_prompt_cache(thread_ts)
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🔄 監視を継続"
+                            },
+                            "action_id": "continue_monitor"
+                        }
+                    ]
+                }
+            ]
+        )
+        # タイムアウト時はスナップショットを削除せず残す
+        _cleanup_prompt_cache(thread_ts)
+    finally:
+        with ACTIVE_MONITOR_LOCK:
+            ACTIVE_MONITORS_BY_THREAD.pop(thread_ts, None)
+            ACTIVE_MONITORS_BY_CHANNEL[channel_id] = max(
+                0, ACTIVE_MONITORS_BY_CHANNEL.get(channel_id, 1) - 1
+            )
 
 # =====================
 # Slack: message → 文字入力 + 操作ボタン表示（スレッド）
 # =====================
-@app.event("message")
-def handle_message(event, logger):
-    channel_id = event.get("channel")
-    if not channel_id:
-        return
+def _get_thread_ts_from_message(message):
+    return message.get("thread_ts") or message.get("ts")
 
-    # 1. Extract text and check validity
-    text = ""
-    if (
-        event.get("user")
-        and not event.get("bot_id")
-        and event.get("text")
-    ):
-        text = event["text"].strip()
-    
+def _normalize_slash_command_text(text: str) -> str:
     if not text:
-        return
+        return text
+    # Strip zero-width characters that can appear in Slack messages
+    text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    return text.strip()
 
-    # Slackでスラッシュコマンドをエスケープした際（例: \/quit）にバックスラッシュを削除
-    # ただし、 \rm や \ls のようなシェル用エスケープは維持したいので、
-    # 次の文字が / の場合のみ削除する
-    if text.startswith("\\/"):
-        text = text[1:]
+def _is_command(text: str, command: str) -> bool:
+    text = _normalize_slash_command_text(text)
+    return re.match(rf"^{re.escape(command)}(\s|$)", text) is not None
 
-    # =====================
-    # Command: /bye (Connection cleanup)
-    # Works even if not connected (to clean up state)
-    # =====================
-    if text == "/bye":
-        try:
-            if os.path.exists(ACTIVE_SESSIONS_FILE):
-                with open(ACTIVE_SESSIONS_FILE, "r", encoding="utf-8") as f:
-                    sessions = json.load(f)
-                
-                if channel_id in sessions:
-                    del sessions[channel_id]
-                    _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
-                    
-                    log(f"Disconnected channel {channel_id}")
-                    app.client.chat_postMessage(
-                        channel=channel_id,
-                        thread_ts=event["ts"],
-                        text="🔌 このチャンネルの接続を解除しました。"
-                    )
-                    return
-                else:
-                    app.client.chat_postMessage(
-                        channel=channel_id,
-                        thread_ts=event["ts"],
-                        text="⚠️ このチャンネルは既に接続されていません。"
-                    )
-                    return
-        except Exception as e:
-            log(f"Error disconnecting: {e}")
-            app.client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=event["ts"],
-                text=f"⚠️ 切断中にエラーが発生しました: {e}"
-            )
-        return
-    
-    # =====================
-    # Command: /dir (Show connected directory)
-    # =====================
-    if text == "/dir":
-        target_dir = get_target_dir(channel_id)
-        if target_dir:
-            app.client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=event["ts"],
-                text=f"📁 接続中のディレクトリ: {target_dir}"
-            )
-        else:
-            app.client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=event["ts"],
-                text="⚠️ 接続中のディレクトリ情報が見つかりません。"
-            )
-        return
+def _handle_bye_command(channel_id: str, thread_ts: str) -> bool:
+    try:
+        if os.path.exists(ACTIVE_SESSIONS_FILE):
+            with open(ACTIVE_SESSIONS_FILE, "r", encoding="utf-8") as f:
+                sessions = json.load(f)
 
-    # =====================
-    # Active Session Check
-    # =====================
-    # Check if this channel has an active tmux session
-    tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
+            if channel_id in sessions:
+                del sessions[channel_id]
+                _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+
+                log(f"Disconnected channel {channel_id}")
+                _post_message(
+                    channel_id,
+                    "🔌 このチャンネルの接続を解除しました。",
+                    thread_ts=thread_ts
+                )
+                return True
+
+            _post_message(
+                channel_id,
+                "⚠️ このチャンネルは既に接続されていません。",
+                thread_ts=thread_ts
+            )
+            return True
+    except Exception as e:
+        log(f"Error disconnecting: {e}")
+        _post_message(
+            channel_id,
+            f"⚠️ 切断中にエラーが発生しました: {e}",
+            thread_ts=thread_ts
+        )
+        return True
+    return False
+
+def _handle_dir_command(channel_id: str, thread_ts: str) -> bool:
+    target_dir = get_target_dir(channel_id)
+    if target_dir:
+        _post_message(
+            channel_id,
+            f"📁 接続中のディレクトリ: {target_dir}",
+            thread_ts=thread_ts
+        )
+    else:
+        _post_message(
+            channel_id,
+            "⚠️ 接続中のディレクトリ情報が見つかりません。",
+            thread_ts=thread_ts
+        )
+    return True
+
+def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bool:
     if not tmux_target:
-        # Ignore messages from unconfigured channels
-        return
+        _post_message(channel_id, "⚠️ Error: No active tmux session.", thread_ts=thread_ts)
+        return True
 
-    log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
+    with ACTIVE_MONITOR_LOCK:
+        if ACTIVE_MONITORS_BY_CHANNEL.get(channel_id, 0) > 0:
+            _post_message(
+                channel_id,
+                "⏳ 処理中です。少々お待ちください。",
+                thread_ts=thread_ts
+            )
 
-    # プロンプトをキャッシュに保存（ボタン実行時に使用するため）
-    PROMPT_CACHE[event["ts"]] = text
-    PROMPT_CACHE_TS[event["ts"]] = time.time()
-
-    # 「スラッシュコマンド」というメッセージを受け取った場合は、ボタンメニューを表示
-    if text == "スラッシュコマンド":
-        app.client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=event["ts"],
-            text="⚡ スラッシュコマンドメニュー:",
-            blocks=get_command_menu_blocks()
-        )
-        return
-
-    # =====================
-    # Command filter (allowlist/denylist)
-    # =====================
-    allowed, reason = is_command_allowed(text)
-    if not allowed:
-        log(f"BLOCKED COMMAND: {text}")
-        app.client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=event["ts"],
-            text=reason
-        )
-        return
-
-    # 数字だけの場合は即時実行
-    if text.isdigit():
-        # ① プリクリア
-        pre_clear_tmux(tmux_target)
-
-        # ② 文字送信
-        send_text_to_tmux(tmux_target, text, thread_ts=event["ts"], channel_id=channel_id)
-        
-        # ③ 通知
-        app.client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=event["ts"],
-            text="🔢 数字入力を検知: 自動実行を開始します..."
-        )
-
-        # ④ 状態保存 -> Enter送信 & 監視開始
+    initial_content, prompt = load_snapshot(thread_ts)
+    if not initial_content:
+        log(f"Snapshot not found for {thread_ts}, using current screen as initial.")
         initial_content = capture_tmux(tmux_target, lines=True)
-        send_enter(tmux_target, thread_ts=event["ts"], channel_id=channel_id)
-        
-        threading.Thread(
-            target=monitor_and_reply,
-            args=(event["ts"], channel_id, tmux_target, initial_content, text),
-            daemon=True
-        ).start()
-        return
+        prompt = ""
 
+    _post_message(
+        channel_id,
+        "🔄 現在の状態を取得しています...",
+        thread_ts=thread_ts
+    )
+
+    threading.Thread(
+        target=monitor_and_reply,
+        args=(thread_ts, channel_id, tmux_target, initial_content, prompt),
+        daemon=True
+    ).start()
+    return True
+
+def _handle_command_menu(channel_id: str, thread_ts: str) -> bool:
+    _post_message(
+        channel_id,
+        "⚡ スラッシュコマンドメニュー:",
+        thread_ts=thread_ts,
+        blocks=get_command_menu_blocks()
+    )
+    return True
+
+def _handle_numeric_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
+    # ① プリクリア
+    pre_clear_tmux(tmux_target)
+
+    # ② 文字送信
+    send_text_to_tmux(tmux_target, text, thread_ts=thread_ts, channel_id=channel_id)
+
+    # ③ 通知
+    _post_message(
+        channel_id,
+        "🔢 数字入力を検知: 自動実行を開始します...",
+        thread_ts=thread_ts
+    )
+
+    # ④ 状態保存 -> Enter送信 & 監視開始
+    initial_content = capture_tmux(tmux_target, lines=True)
+    send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
+
+    threading.Thread(
+        target=monitor_and_reply,
+        args=(thread_ts, channel_id, tmux_target, initial_content, text),
+        daemon=True
+    ).start()
+
+def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
     # ① 文字だけ tmux に送る
-    send_text_to_tmux(tmux_target, text, thread_ts=event["ts"], channel_id=channel_id)
+    send_text_to_tmux(tmux_target, text, thread_ts=thread_ts, channel_id=channel_id)
 
     # ② 同じメッセージのスレッドに操作ボタンを出す
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=event["ts"],
-        text="操作を選んでください（実行すると自動で監視・応答します）",
+    _post_message(
+        channel_id,
+        "操作を選んでください（実行すると自動で監視・応答します）",
+        thread_ts=thread_ts,
         blocks=[
             {
                 "type": "actions",
@@ -726,6 +815,94 @@ def handle_message(event, logger):
         ]
     )
 
+@app.event("message")
+def handle_message(event, logger):
+    channel_id = event.get("channel")
+    if not channel_id:
+        return
+
+    # 1. Extract text and check validity
+    text = ""
+    if (
+        event.get("user")
+        and not event.get("bot_id")
+        and event.get("text")
+    ):
+        text = event["text"].strip()
+    
+    if not text:
+        return
+
+    log(f"TEXT RAW: {repr(text)}")
+    log(f"TEXT NORM: {repr(_normalize_slash_command_text(text))}")
+
+    # Slackでスラッシュコマンドをエスケープした際（例: \/quit）にバックスラッシュを削除
+    # ただし、 \rm や \ls のようなシェル用エスケープは維持したいので、
+    # 次の文字が / の場合のみ削除する
+    if text.startswith("\\/"):
+        text = text[1:]
+
+    thread_ts = _get_thread_ts_from_message(event)
+
+    # =====================
+    # Command: /bye (Connection cleanup)
+    # Works even if not connected (to clean up state)
+    # =====================
+    if _is_command(text, "/bye"):
+        if _handle_bye_command(channel_id, thread_ts):
+            return
+    
+    # =====================
+    # Command: /dir (Show connected directory)
+    # =====================
+    if _is_command(text, "/dir"):
+        _handle_dir_command(channel_id, thread_ts)
+        return
+    if _is_command(text, "/now"):
+        tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
+        _handle_now_command(channel_id, thread_ts, tmux_target)
+        return
+    if _is_command(text, "/sessions"):
+        output = _build_sessions_output()
+        _post_message(channel_id, output, thread_ts=thread_ts)
+        return
+
+    # =====================
+    # Active Session Check
+    # =====================
+    # Check if this channel has an active tmux session
+    tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
+    if not tmux_target:
+        # Ignore messages from unconfigured channels
+        return
+
+    log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
+
+    # プロンプトをキャッシュに保存（ボタン実行時に使用するため）
+    PROMPT_CACHE[event["ts"]] = text
+    PROMPT_CACHE_TS[event["ts"]] = time.time()
+
+    # 「スラッシュコマンド」というメッセージを受け取った場合は、ボタンメニューを表示
+    if text == "スラッシュコマンド":
+        _handle_command_menu(channel_id, thread_ts)
+        return
+
+    # =====================
+    # Command filter (allowlist/denylist)
+    # =====================
+    allowed, reason = is_command_allowed(text)
+    if not allowed:
+        log(f"BLOCKED COMMAND: {text}")
+        _post_message(channel_id, reason, thread_ts=thread_ts)
+        return
+
+    # 数字だけの場合は即時実行
+    if text.isdigit():
+        _handle_numeric_message(channel_id, thread_ts, tmux_target, text)
+        return
+
+    _handle_text_message(channel_id, thread_ts, tmux_target, text)
+
 # =====================
 # Slack: ▶︎ 実行（Enter） → 自動監視開始
 # =====================
@@ -737,24 +914,28 @@ def handle_send_enter(ack, body):
     channel_id = body["channel"]["id"]
     tmux_target = get_target_pane(channel_id)
     if not tmux_target:
-        app.client.chat_postMessage(channel=channel_id, text="⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal.")
+        _post_message(channel_id, "⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal.")
         return
 
     # スレッドの親TSを取得
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
 
     # プロンプトをキャッシュから取得
     prompt = PROMPT_CACHE.get(thread_ts, "")
 
     # 通知
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text="🚀 実行を開始しました（監視中）..."
+    _post_message(
+        channel_id,
+        "🚀 実行を開始しました（監視中）...",
+        thread_ts=thread_ts
     )
 
     # プリクリアを実行
     pre_clear_tmux(tmux_target)
+
+    # 文字列を再送してから Enter を送信する
+    if prompt:
+        send_text_to_tmux(tmux_target, prompt, thread_ts=thread_ts, channel_id=channel_id)
 
     # 現在の画面状態を保存 (クリーンな状態)
     initial_content = capture_tmux(tmux_target, lines=True)
@@ -780,10 +961,10 @@ def handle_continue_monitor(ack, body):
     channel_id = body["channel"]["id"]
     tmux_target = get_target_pane(channel_id)
     if not tmux_target:
-        app.client.chat_postMessage(channel=channel_id, text="⚠️ Error: No active tmux session.")
+        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
     
     initial_content, prompt = load_snapshot(thread_ts)
     if not initial_content:
@@ -792,10 +973,10 @@ def handle_continue_monitor(ack, body):
         initial_content = capture_tmux(tmux_target, lines=True)
         prompt = ""
 
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text="🔄 監視を再開しました..."
+    _post_message(
+        channel_id,
+        "🔄 監視を再開しました...",
+        thread_ts=thread_ts
     )
 
     threading.Thread(
@@ -887,12 +1068,12 @@ def handle_show_commands(ack, body):
     log("BUTTON CLICKED: show_commands")
     
     channel_id = body["channel"]["id"]
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
 
-    app.client.chat_postMessage(
-        channel=channel_id,
+    _post_message(
+        channel_id,
+        "実行したいコマンドを選択してください（即時実行されます）:",
         thread_ts=thread_ts,
-        text="実行したいコマンドを選択してください（即時実行されます）:",
         blocks=get_command_menu_blocks()
     )
 
@@ -906,19 +1087,19 @@ def handle_slash_command(ack, body):
     channel_id = body["channel"]["id"]
     tmux_target = get_target_pane(channel_id)
     if not tmux_target:
-        app.client.chat_postMessage(channel=channel_id, text="⚠️ Error: No active tmux session.")
+        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
     # action_id が何であれ、value にコマンドが入っているのでそれを使う
     cmd_text = body["actions"][0]["value"]
     log(f"COMMAND CLICKED: {cmd_text}")
     
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
 
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text=f"⚡ コマンド実行: `{cmd_text}`"
+    _post_message(
+        channel_id,
+        f"⚡ コマンド実行: `{cmd_text}`",
+        thread_ts=thread_ts
     )
 
     # 1. プリクリア (既存の入力も C-u の代わりに C-l で実質的に消えるか、C-uを併用)
@@ -951,16 +1132,16 @@ def handle_delete_prompt(ack, body):
     if not tmux_target:
         return # 静かに無視、あるいはエラー表示
 
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
 
     # Ctrl+u を送信して行をクリア
     cmd = ["tmux", "send-keys", "-t", tmux_target, "C-u"]
     subprocess.run(cmd)
     
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text="🗑️ 入力中のプロンプトを削除しました。"
+    _post_message(
+        channel_id,
+        "🗑️ 入力中のプロンプトを削除しました。",
+        thread_ts=thread_ts
     )
 
 # =====================
@@ -974,19 +1155,19 @@ def handle_show_gemini(ack, body):
     channel_id = body["channel"]["id"]
     tmux_target = get_target_pane(channel_id)
     if not tmux_target:
-        app.client.chat_postMessage(channel=channel_id, text="⚠️ Error: No active tmux session.")
+        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
 
     out = capture_tmux(tmux_target).strip()
     if not out:
         out = "(no output)"
 
-    app.client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        text="```" + out[-3500:] + "```"
+    _post_message(
+        channel_id,
+        "```" + out[-3500:] + "```",
+        thread_ts=thread_ts
     )
 
 # =====================
@@ -994,35 +1175,8 @@ def handle_show_gemini(ack, body):
 # =====================
 @app.message(re.compile(r"^/sessions$"))
 def handle_sessions_message(message, say):
-    sessions = _load_active_sessions()
-    if not sessions:
-        say(text="(no active sessions)")
-        return
-
-    now = time.time()
-    lines = ["Active sessions:"]
-    for channel_id, value in sessions.items():
-        last_ts = LAST_EVENT_TS_BY_CHANNEL.get(channel_id, 0)
-        age = _format_age(now - last_ts) if last_ts else "never"
-        if isinstance(value, dict):
-            tmux_target = value.get("pane")
-            target_dir = value.get("dir")
-            channel_name = value.get("name")
-        else:
-            tmux_target = value
-            target_dir = None
-            channel_name = None
-        if target_dir:
-            if channel_name:
-                lines.append(f"- {channel_id} ({channel_name}) -> {tmux_target} ({target_dir}) (last event: {age} ago)")
-            else:
-                lines.append(f"- {channel_id} -> {tmux_target} ({target_dir}) (last event: {age} ago)")
-        else:
-            if channel_name:
-                lines.append(f"- {channel_id} ({channel_name}) -> {tmux_target} (last event: {age} ago)")
-            else:
-                lines.append(f"- {channel_id} -> {tmux_target} (last event: {age} ago)")
-    say(text="```\n" + "\n".join(lines) + "\n```")
+    output = _build_sessions_output()
+    say(text=output)
 
 # =====================
 # 起動通知

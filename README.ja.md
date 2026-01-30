@@ -41,7 +41,7 @@ pip install -r requirements.txt
 4. **Event Subscriptions** をオンにし、bot イベントに `message.channels`（必要なら `message.groups` / `message.im` / `message.mpim`）を追加。
 5. **OAuth & Permissions** に戻り「Install to Workspace」で Bot をインストールし、`xoxb-…` トークンを控えます。
 6. 対象チャンネルに Bot を招待（`/invite @AppName`）。
-7. チャンネルのリンクをコピーし、`C…` で始まるチャンネル ID を `.env` に記入。
+7. `goslack.py` は「作業ディレクトリ名 = チャンネル名」で解決するため、ディレクトリ名をチャンネル名に合わせる（または `ai-studio-01/02/03` を用意する）ことを推奨します。
 
 ### 3. 環境変数
 
@@ -53,7 +53,7 @@ cp .env.sample .env
 
 - `SLACK_BOT_TOKEN`: `xoxb-…` Bot トークン
 - `SLACK_APP_TOKEN`: `xapp-…` Socket Mode 用 App トークン
-- `TARGET_CHANNEL_ID`: ブリッジを待ち受けるチャンネル ID
+- `TARGET_CHANNEL_ID`: 旧設定（現行実装では未使用）
 - `LOG_LEVEL`: ロギングレベル（`INFO`, `DEBUG` など）
 - `OUTPUT_DIFF_MODE`: 出力差分方式（`replace` または `suffix`）
 - `EVENT_HEALTH_TIMEOUT`: 指定秒数イベントがこなければ警告（`0` で無効）
@@ -80,6 +80,7 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 
 - `goslack.py` は `active_sessions.json` を atomic に書き込み、途中でファイルが壊れるのを防ぎます。
 - 同じ tmux ペインを指す別チャネルがあれば、起動時に削除されて現在のチャネルだけが残る仕組みです。
+- チャンネルは「作業ディレクトリ名 = チャンネル名」で解決され、見つからない場合は `ai-studio-01/02/03` にフォールバックします。
 
 ### 4. スクリプトを準備
 
@@ -145,7 +146,7 @@ cp .env.sample .env
 ### 2. tmux と goslack
 
 1. `tmux new-session -s gemini` などで Gemini を起動。
-2. 対象ペイン内で `python goslack.py` を実行し、チャンネルとペインの対応を `active_sessions.json` に書き込みます。他のチャンネルが同じペインを参照している場合は自動で削除されます。
+2. 対象ペイン内で `python goslack.py` を実行し、チャンネルとペインの対応を `active_sessions.json` に書き込みます。チャンネルは作業ディレクトリ名から解決し、見つからない場合は `ai-studio-01/02/03` にフォールバックします。他のチャンネルが同じペインを参照している場合は自動で削除されます。
 
 ### 3. ブリッジを起動
 

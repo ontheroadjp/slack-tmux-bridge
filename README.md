@@ -45,7 +45,7 @@ pip install -r requirements.txt
    - `message.groups`, `message.im`, `message.mpim` if you will use those surfaces.
 5. Back in **OAuth & Permissions**, click **Install to Workspace** and allow the scopes. Copy the Bot Token (`xoxb-…`).
 6. Invite the app to your target channel (`/invite @YourAppName`).
-7. Copy the channel’s ID (right-click the channel name → “Copy link”) and note the `C…` string.
+7. `goslack.py` resolves channels by the current directory name; align your directory name with your Slack channel name (or prepare `ai-studio-01/02/03` as fallbacks).
 
 ### 3. Environment variables
 
@@ -57,7 +57,7 @@ cp .env.sample .env
 
 - `SLACK_BOT_TOKEN` – `xoxb-…` token.
 - `SLACK_APP_TOKEN` – `xapp-…` token for Socket Mode.
-- `TARGET_CHANNEL_ID` – channel ID where the bridge listens.
+- `TARGET_CHANNEL_ID` – legacy setting (unused by current implementation).
 - `LOG_LEVEL` – controls Bolt/SDK logging (`INFO`, `DEBUG`).
 - `OUTPUT_DIFF_MODE` – choose `replace` (current output) or `suffix` (print everything after the last occurrence of the initial screen).
 - `EVENT_HEALTH_*` – tune timeout, action (`log`, `exit`, `restart`), restart cooldown, notification delivery, and notification cooldown.
@@ -80,6 +80,7 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 
 - `goslack.py` writes `active_sessions.json` atomically, avoiding partial writes.
 - If another Slack channel already points to the same tmux pane, running `goslack.py` removes the stale entry so only the current channel remains.
+- Channel resolution uses the current directory name; if not found, it falls back to `ai-studio-01/02/03`.
 
 ### 4. Prepare scripts
 
@@ -140,12 +141,12 @@ pip install -r requirements.txt
 cp .env.sample .env
 ```
 
-Edit `.env` with your Slack tokens, channel ID, and optional tuning values documented above.
+Edit `.env` with your Slack tokens and optional tuning values documented above.
 
 ### 2. tmux & goslack
 
 1. Start Gemini inside a tmux pane (`tmux new-session -s gemini`, run `gemini`).
-2. Inside that pane, run `python goslack.py` to register the channel ↔ pane mapping. `goslack.py` automatically removes any other channel that referenced the same pane.
+2. Inside that pane, run `python goslack.py` to register the channel ↔ pane mapping. `goslack.py` resolves the Slack channel by the current directory name; if not found, it falls back to `ai-studio-01/02/03` in order. It also automatically removes any other channel that referenced the same pane.
 
 ### 3. Run the bridge
 

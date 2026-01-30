@@ -2,6 +2,7 @@
 bk_*
 
 .env
+active_sessions.json
 __pycache__
 venv
 bot.log

@@ -11,7 +11,7 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless explicitly escaped.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
 - **Health monitoring**: Workers prune old snapshots/prompts and detect stalled event streams, with optional warnings or self-restart actions.
-- **Session visibility**: `/sessions` command shows which Slack channel maps to which tmux pane plus the last activity age.
+- **Session visibility**: `/sessions` command shows which Slack channel maps to which tmux pane plus the last activity age (and channel name when available).
 
 ## Requirements
 
@@ -45,7 +45,7 @@ pip install -r requirements.txt
    - `message.groups`, `message.im`, `message.mpim` if you will use those surfaces.
 5. Back in **OAuth & Permissions**, click **Install to Workspace** and allow the scopes. Copy the Bot Token (`xoxb-…`).
 6. Invite the app to your target channel (`/invite @YourAppName`).
-7. `goslack.py` resolves channels by the current directory name; align your directory name with your Slack channel name (or prepare `ai-studio-01/02/03` as fallbacks).
+7. `goslack.py` resolves channels by the current directory name via Slack API; align your directory name with your Slack channel name (or prepare `ai-studio-01/02/03` as fallbacks).
 
 ### 3. Environment variables
 
@@ -80,6 +80,27 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 
 - `goslack.py` writes `active_sessions.json` atomically, avoiding partial writes.
 - If another Slack channel already points to the same tmux pane, running `goslack.py` removes the stale entry so only the current channel remains.
+- `active_sessions.json` stores `pane`, `dir`, and `name` (channel name) per channel ID.
+- `goslack.py list` prints numbered mappings; `goslack.py rm <number>` removes a mapping by its list number.
+  - Ordering rules: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` come first (in numeric order), then all other channels.
+  - For non ai-studio channels, ordering is by channel name (ascending). Channels without a name appear as `-`.
+  - `goslack.py rm <number>` exits with an error if the number is out of range.
+
+Example (`goslack.py list`):
+
+```
+num	channel_name	pane	dir
+1	ai-studio-01	1:1.0	/Users/you/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	/Users/you/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	/Users/you/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	/Users/you/WORKSPACE/project-x
+```
+
+Example removal:
+
+```
+python goslack.py rm 4
+```
 - Channel resolution uses the current directory name; if not found, it falls back to `ai-studio-01/02/03`.
 
 ### 4. Prepare scripts
@@ -167,6 +188,7 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
    - Text requires pressing the “Execute (Enter)” button that appears in the thread.
    - Numeric-only messages send automatically.
    - `text == "/sessions"` (or `\/sessions`) shows the active mappings and last event times.
+   - `text == "/dir"` (or `\/dir`) shows the connected directory for the channel.
 2. The bridge monitors Gemini and replies in the thread, chunking long outputs into 3,000-character pieces.
 
 ### 5. Health monitoring
@@ -184,6 +206,21 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 
 ## Utilities
 
-- `/sessions`: Slack command that posts a table of channel-to-pane mappings plus the age of the last event.
-- `goslack.py`: Registers the current tmux pane with the target channel and cleans up duplicates.
+- `/sessions`: Slack command that posts a table of channel-to-pane mappings plus the age of the last event (and channel name when available).
+- `/dir`: Slack command that returns the connected directory.
+- `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered) for session maintenance.
+
+Example (`/sessions` output):
+
+```
+Active sessions:
+- C0ABWS7U8E6 (ai-studio-01) -> 1:1.0 (/Users/you/WORKSPACE/ai-studio-01) (last event: 12s ago)
+- C0XYZ123456 (project-x) -> 2:0.0 (/Users/you/WORKSPACE/project-x) (last event: 3m ago)
+```
+
+Example (`/dir` output):
+
+```
+📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
+```
 - `run_slack_bridge.sh`: Loads `.env` before launching the core bridge script (used by `launchd`).

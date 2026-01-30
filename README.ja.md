@@ -11,7 +11,7 @@
 - **コマンドフィルタ**: allowlist + denylist ルールと、デフォルトで `rm` をブロックする仕組み。
 - **単一起動ガード**: PID ファイルで Socket Mode の二重接続を防ぎます。
 - **ヘルス監視**: キャッシュ/スナップショットを定期クリーンし、イベント停止をログ・通知・再起動で検出。
-- **セッション可視化**: `/sessions` でチャンネルと tmux ペインの対応、最終イベント時刻を確認できます。
+- **セッション可視化**: `/sessions` でチャンネルと tmux ペインの対応、最終イベント時刻（チャンネル名があれば併記）を確認できます。
 
 ## 要件
 
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 4. **Event Subscriptions** をオンにし、bot イベントに `message.channels`（必要なら `message.groups` / `message.im` / `message.mpim`）を追加。
 5. **OAuth & Permissions** に戻り「Install to Workspace」で Bot をインストールし、`xoxb-…` トークンを控えます。
 6. 対象チャンネルに Bot を招待（`/invite @AppName`）。
-7. `goslack.py` は「作業ディレクトリ名 = チャンネル名」で解決するため、ディレクトリ名をチャンネル名に合わせる（または `ai-studio-01/02/03` を用意する）ことを推奨します。
+7. `goslack.py` は「作業ディレクトリ名 = チャンネル名」を Slack API で解決するため、ディレクトリ名をチャンネル名に合わせる（または `ai-studio-01/02/03` を用意する）ことを推奨します。
 
 ### 3. 環境変数
 
@@ -81,6 +81,27 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 - `goslack.py` は `active_sessions.json` を atomic に書き込み、途中でファイルが壊れるのを防ぎます。
 - 同じ tmux ペインを指す別チャネルがあれば、起動時に削除されて現在のチャネルだけが残る仕組みです。
 - チャンネルは「作業ディレクトリ名 = チャンネル名」で解決され、見つからない場合は `ai-studio-01/02/03` にフォールバックします。
+- `active_sessions.json` には `pane`, `dir`, `name`（チャンネル名）を保存します。
+- `goslack.py list` で番号付き一覧を表示し、`goslack.py rm <番号>` で削除します。
+  - 並び順: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` が先頭（番号順）、それ以外が続きます。
+  - `ai-studio` 以外はチャンネル名の昇順。名前が無い場合は `-` と表示されます。
+  - `goslack.py rm <番号>` は番号が範囲外の場合にエラー終了します。
+
+出力例（`goslack.py list`）:
+
+```
+num	channel_name	pane	dir
+1	ai-studio-01	1:1.0	/Users/you/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	/Users/you/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	/Users/you/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	/Users/you/WORKSPACE/project-x
+```
+
+削除例:
+
+```
+python goslack.py rm 4
+```
 
 ### 4. スクリプトを準備
 
@@ -167,6 +188,7 @@ python slack_tmux_bridge.py
    - テキスト: 表示される「実行（Enter）」で確定。
    - 数字のみ: 自動で実行されます。
    - `/sessions`（または `\/sessions`）で現在のマッピングと最終イベント時刻を表示。
+   - `/dir`（または `\/dir`）で接続中ディレクトリを表示。
 2. ブリッジは Gemini の出力完了を待ってスレッドで返信します（3,000文字ごとに分割）。
 
 ### 5. ヘルス監視
@@ -184,6 +206,21 @@ python slack_tmux_bridge.py
 
 ## ユーティリティ
 
-- `/sessions`: マッピングと最終イベント年齢を表示。
-- `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。
+- `/sessions`: マッピングと最終イベント年齢（チャンネル名があれば併記）を表示。
+- `/dir`: 接続中ディレクトリを表示。
+- `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。`list`/`rm`（番号指定）で管理可能。
+
+出力例（`/sessions`）:
+
+```
+Active sessions:
+- C0ABWS7U8E6 (ai-studio-01) -> 1:1.0 (/Users/you/WORKSPACE/ai-studio-01) (last event: 12s ago)
+- C0XYZ123456 (project-x) -> 2:0.0 (/Users/you/WORKSPACE/project-x) (last event: 3m ago)
+```
+
+出力例（`/dir`）:
+
+```
+📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
+```
 - `run_slack_bridge.sh`: `.env` を読み込み `slack_tmux_bridge.py` を起動（`launchd` 時に利用）。

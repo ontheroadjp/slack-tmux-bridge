@@ -51,6 +51,8 @@
 | `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` | `600` | 通知抑制 | 通知スパム防止 |
 | `PROMPT_CACHE_TTL_SEC` | `3600` | プロンプトキャッシュ | メモリ肥大防止 |
 | `SNAPSHOT_TTL_SEC` | `86400` | スナップショット保持 | 長期運用でのディスク肥大防止 |
+| `CHANNEL_IDLE_NOTIFY_SEC` | `1800` | アイドル通知間隔 | 無反応チャンネルへの定期通知 |
+| `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` | `1800` | アイドル通知抑制 | 通知スパム防止 |
 
 ---
 
@@ -61,7 +63,7 @@
 - 同一ペインを指す他チャンネルのエントリは**自動で削除**。
 
 ### 4.2 フロー
-1. 現在の作業ディレクトリ名（= Slack チャンネル名）を Slack API で解決し、該当チャンネルIDを取得する。見つからない場合は `ai-studio-01/02/03` をフォールバックとして解決する。
+1. 現在の作業ディレクトリ名（= Slack チャンネル名）を Slack API で解決し、該当チャンネルIDを取得する。見つからない場合は `ai-studio-01/02/03` をフォールバックとして解決する（未使用を優先、すべて使用中なら `01 → 02 → 03 → 01 ...` でローテーション）。
 2. `tmux display-message` で `session:window.pane` を取得。
 3. 既存の `active_sessions.json` から同一ペインの他エントリを削除。
 4. 新しいチャンネル→ペインを登録（atomic 書き込み）。`dir` と `name`（チャンネル名）も保存する。
@@ -76,6 +78,7 @@
 ### 4.4 サブコマンド
 - `goslack.py list`: `active_sessions.json` の一覧を番号付きで表示（`num`, `channel_name`, `pane`, `dir`）。
 - `goslack.py rm <number>`: 一覧の番号を指定して削除。
+ - `goslack.py --add <pane>`: 別ペインから指定ペインを登録（対象ペインの `pane_current_path` を利用）。
   - 並び順は `ai-studio-01/02/03` が先頭（番号順）、それ以外はチャンネル名の昇順。
   - チャンネル名が無い場合は `-` として扱われる。
   - 番号が範囲外の場合はエラー終了する。
@@ -105,6 +108,7 @@ python goslack.py rm 4
   - bot 由来は除外（`bot_id` を見て除外）。
 - `/bye` は特別扱いで接続解除する。
 - `/dir` は接続中ディレクトリを返す（記録がある場合）。
+- `/now` は「監視を継続」と同じ処理で、最新の Gemini 出力を取得する。
 - `active_sessions.json` に登録がないチャンネルは**無視**。
 
 ### 5.2 コマンドフィルタ
@@ -152,7 +156,7 @@ python goslack.py rm 4
 
 ### 7.1 監視スレッド
 - `monitor_and_reply()` が別スレッドで動作。
-- 1 秒間隔で `tmux capture-pane` し、**2 回連続で変化がなければ完了**と判断。
+- 1 秒間隔で `tmux capture-pane` し、**3 回連続で変化がなければ完了**と判断（約3秒）。
 - `"1. Allow once"` のような権限プロンプトを検知した場合も即時返信。
 
 ### 7.2 抽出ロジック
@@ -196,6 +200,11 @@ python goslack.py rm 4
 ### 9.3 通知
 - `EVENT_HEALTH_NOTIFY=1` の場合、イベント停止チャンネルに通知。
 - 通知は `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` で抑制。
+- `CHANNEL_IDLE_NOTIFY_SEC` が有効な場合、無反応チャンネルに定期通知（`CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` で抑制）。
+
+### 9.4 重複検知
+- 同一 tmux ペインが複数チャンネルに紐づいている場合、定期的に検出して重複を解消する。
+- 直近でアクティブなチャンネルを優先し、もう一方は切断して通知する。
 
 **なぜ**: Socket Mode は静かに切断される可能性があるため、監視と自己復旧が必要。
 

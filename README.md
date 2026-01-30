@@ -5,13 +5,15 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 ## Features
 
 - **Slack integration**: Bolt Socket Mode receives channel messages, posts replies, and exposes slash commands.
-- **Smart monitoring**: Captures `tmux` output every second, detects stability or permission prompts, and only posts the completed response.
+- **Smart monitoring**: Captures `tmux` output every second, treats 3 seconds of no change as “complete” (or permission prompts), and posts the response.
 - **Pre-clear and clean output**: Runs `tmux clear-history` + `Ctrl+L` before each command, then extracts everything after the echoed prompt (`> [prompt]`).
 - **Input ergonomics**: Numeric messages auto-run, text messages stay pending until you press “Execute (Enter)”, and selected slash commands send prebuilt inputs.
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless explicitly escaped.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
 - **Health monitoring**: Workers prune old snapshots/prompts and detect stalled event streams, with optional warnings or self-restart actions.
 - **Session visibility**: `/sessions` command shows which Slack channel maps to which tmux pane plus the last activity age (and channel name when available).
+- **Idle ping**: Per-channel idle notifications when no messages arrive for a while.
+- **Duplicate cleanup**: Periodically detects duplicate pane mappings and disconnects the older one with a notice.
 
 ## Requirements
 
@@ -62,6 +64,7 @@ cp .env.sample .env
 - `OUTPUT_DIFF_MODE` – choose `replace` (current output) or `suffix` (print everything after the last occurrence of the initial screen).
 - `EVENT_HEALTH_*` – tune timeout, action (`log`, `exit`, `restart`), restart cooldown, notification delivery, and notification cooldown.
 - `PROMPT_CACHE_TTL_SEC` / `SNAPSHOT_TTL_SEC` – retention windows for cached prompts and snapshots; maintenance workers purge expired files.
+- `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` – idle notification interval and cooldown (per channel).
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks standalone `rm`.
 
 Command filter notes:
@@ -82,6 +85,7 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 - If another Slack channel already points to the same tmux pane, running `goslack.py` removes the stale entry so only the current channel remains.
 - `active_sessions.json` stores `pane`, `dir`, and `name` (channel name) per channel ID.
 - `goslack.py list` prints numbered mappings; `goslack.py rm <number>` removes a mapping by its list number.
+- `goslack.py --add <pane>` registers a target tmux pane from another pane (uses the target pane’s current directory).
   - Ordering rules: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` come first (in numeric order), then all other channels.
   - For non ai-studio channels, ordering is by channel name (ascending). Channels without a name appear as `-`.
   - `goslack.py rm <number>` exits with an error if the number is out of range.
@@ -102,6 +106,7 @@ Example removal:
 python goslack.py rm 4
 ```
 - Channel resolution uses the current directory name; if not found, it falls back to `ai-studio-01/02/03`.
+  - Fallback selection prefers an unused `ai-studio-*` name; if all are in use, it rotates `01 → 02 → 03 → 01 ...`.
 
 ### 4. Prepare scripts
 
@@ -168,6 +173,7 @@ Edit `.env` with your Slack tokens and optional tuning values documented above.
 
 1. Start Gemini inside a tmux pane (`tmux new-session -s gemini`, run `gemini`).
 2. Inside that pane, run `python goslack.py` to register the channel ↔ pane mapping. `goslack.py` resolves the Slack channel by the current directory name; if not found, it falls back to `ai-studio-01/02/03` in order. It also automatically removes any other channel that referenced the same pane.
+   - If the target pane is already occupied, run `python goslack.py --add 1:2.0` from another pane to register it by tmux target.
 
 ### 3. Run the bridge
 
@@ -189,14 +195,17 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
    - Numeric-only messages send automatically.
    - `text == "/sessions"` (or `\/sessions`) shows the active mappings and last event times.
    - `text == "/dir"` (or `\/dir`) shows the connected directory for the channel.
-2. The bridge monitors Gemini and replies in the thread, chunking long outputs into 3,000-character pieces.
+   - `text == "/now"` (or `\/now`) triggers the same logic as “Continue monitoring” to fetch the latest Gemini state.
+2. The bridge monitors Gemini and replies in the thread, chunking long outputs into 3,000-character pieces. If output stays unchanged for ~3 seconds, it is treated as complete and posted.
 
 ### 5. Health monitoring
 
 - `_maintenance_worker` prunes prompt cache and snapshot files using `PROMPT_CACHE_TTL_SEC` / `SNAPSHOT_TTL_SEC`.
+- `_maintenance_worker` also checks for duplicate pane mappings and disconnects the redundant channel with a notice.
 - `_event_health_worker` watches for `EVENT_HEALTH_TIMEOUT` seconds of no events and either logs, exits, restarts, or notifies channels.
 - Set `EVENT_HEALTH_NOTIFY=1` to post warnings per channel when they go silent; `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` throttles repeats.
 - Restart actions respect `EVENT_HEALTH_RESTART_COOLDOWN_SEC` to avoid rapid loops.
+- Set `CHANNEL_IDLE_NOTIFY_SEC` to post periodic “idle” pings per channel.
 
 ## Deployment tiers
 
@@ -208,7 +217,8 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 
 - `/sessions`: Slack command that posts a table of channel-to-pane mappings plus the age of the last event (and channel name when available).
 - `/dir`: Slack command that returns the connected directory.
-- `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered) for session maintenance.
+- `/now`: Slack command that re-runs monitoring to fetch the latest Gemini output.
+- `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered) and `--add` for session maintenance.
 
 Example (`/sessions` output):
 

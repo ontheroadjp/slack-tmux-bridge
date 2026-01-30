@@ -5,13 +5,15 @@
 ## 機能
 
 - **Slack 連携**: Bolt Socket Mode でチャンネルメッセージを受信し、返信やスラッシュコマンドを提供します。
-- **スマート監視**: `tmux` 出力を 1 秒ごとにキャプチャし、安定または権限プロンプトを検知してからレスポンスを投稿します。
+- **スマート監視**: `tmux` 出力を 1 秒ごとにキャプチャし、3 秒の無変化（または権限プロンプト）で完了とみなしてレスポンスを投稿します。
 - **事前クリアと出力整形**: 各操作前に `tmux clear-history` + `Ctrl+L` を実行し、実行プロンプト (`> [prompt]`) 以降だけを抽出します。
 - **入力エルゴノミクス**: 数字メッセージは自動実行、テキストは「実行」ボタンで Enter、スラッシュコマンドはメニューで送信します。
 - **コマンドフィルタ**: allowlist + denylist ルールと、デフォルトで `rm` をブロックする仕組み。
 - **単一起動ガード**: PID ファイルで Socket Mode の二重接続を防ぎます。
 - **ヘルス監視**: キャッシュ/スナップショットを定期クリーンし、イベント停止をログ・通知・再起動で検出。
 - **セッション可視化**: `/sessions` でチャンネルと tmux ペインの対応、最終イベント時刻（チャンネル名があれば併記）を確認できます。
+- **アイドル通知**: チャンネルが無反応の状態が続いたら定期的に通知します。
+- **重複クリーンアップ**: 同一ペインの重複登録を定期検知し、片方を切断して通知します。
 
 ## 要件
 
@@ -62,6 +64,7 @@ cp .env.sample .env
 - `EVENT_HEALTH_NOTIFY`: `1` でチャネル通知を有効化
 - `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC`: 通知間のクールダウン（秒）
 - `PROMPT_CACHE_TTL_SEC` / `SNAPSHOT_TTL_SEC`: キャッシュ・スナップショットの保持時間
+- `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC`: アイドル通知の間隔とクールダウン（チャンネル単位）
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST`: カンマ区切りのマッチパターン（`all` で全許可/拒否）
 
 コマンドフィルタの注意点:
@@ -81,8 +84,10 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 - `goslack.py` は `active_sessions.json` を atomic に書き込み、途中でファイルが壊れるのを防ぎます。
 - 同じ tmux ペインを指す別チャネルがあれば、起動時に削除されて現在のチャネルだけが残る仕組みです。
 - チャンネルは「作業ディレクトリ名 = チャンネル名」で解決され、見つからない場合は `ai-studio-01/02/03` にフォールバックします。
+  - 未使用の `ai-studio-*` を優先し、すべて使用中なら `01 → 02 → 03 → 01 ...` でローテーションします。
 - `active_sessions.json` には `pane`, `dir`, `name`（チャンネル名）を保存します。
 - `goslack.py list` で番号付き一覧を表示し、`goslack.py rm <番号>` で削除します。
+- `goslack.py --add <pane>` で別ペインから指定ペインを登録できます（対象ペインの作業ディレクトリを利用）。
   - 並び順: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` が先頭（番号順）、それ以外が続きます。
   - `ai-studio` 以外はチャンネル名の昇順。名前が無い場合は `-` と表示されます。
   - `goslack.py rm <番号>` は番号が範囲外の場合にエラー終了します。
@@ -168,6 +173,7 @@ cp .env.sample .env
 
 1. `tmux new-session -s gemini` などで Gemini を起動。
 2. 対象ペイン内で `python goslack.py` を実行し、チャンネルとペインの対応を `active_sessions.json` に書き込みます。チャンネルは作業ディレクトリ名から解決し、見つからない場合は `ai-studio-01/02/03` にフォールバックします。他のチャンネルが同じペインを参照している場合は自動で削除されます。
+   - ペインが既に占有されている場合は、別ペインから `python goslack.py --add 1:2.0` を実行して登録できます。
 
 ### 3. ブリッジを起動
 
@@ -189,14 +195,17 @@ python slack_tmux_bridge.py
    - 数字のみ: 自動で実行されます。
    - `/sessions`（または `\/sessions`）で現在のマッピングと最終イベント時刻を表示。
    - `/dir`（または `\/dir`）で接続中ディレクトリを表示。
-2. ブリッジは Gemini の出力完了を待ってスレッドで返信します（3,000文字ごとに分割）。
+   - `/now`（または `\/now`）で「監視を継続」と同じ処理を実行し、最新状態を取得。
+2. ブリッジは Gemini の出力完了を待ってスレッドで返信します（3,000文字ごとに分割）。3 秒無変化なら完了として投稿します。
 
 ### 5. ヘルス監視
 
 - `_maintenance_worker` が `PROMPT_CACHE_TTL_SEC` / `SNAPSHOT_TTL_SEC` に従ってキャッシュとスナップショットを削除します。
+- `_maintenance_worker` は同一ペインの重複登録も検知し、片方を切断して通知します。
 - `_event_health_worker` が `EVENT_HEALTH_TIMEOUT` 秒イベントがないチャンネルを監視し、`EVENT_HEALTH_ACTION` に応じてログ出力・終了・再起動します。
 - `EVENT_HEALTH_NOTIFY=1` なら静かなチャンネルに通知を投げ、`EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` で通知間隔を調整します。
 - 再起動は `EVENT_HEALTH_RESTART_COOLDOWN_SEC` で連続を防止します。
+- `CHANNEL_IDLE_NOTIFY_SEC` を設定すると、一定時間無反応のチャンネルに定期通知します。
 
 ## 運用フェーズ
 
@@ -208,7 +217,8 @@ python slack_tmux_bridge.py
 
 - `/sessions`: マッピングと最終イベント年齢（チャンネル名があれば併記）を表示。
 - `/dir`: 接続中ディレクトリを表示。
-- `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。`list`/`rm`（番号指定）で管理可能。
+- `/now`: 監視を再開し、最新の Gemini 出力を取得。
+- `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。`list`/`rm`（番号指定）や `--add` で管理可能。
 
 出力例（`/sessions`）:
 

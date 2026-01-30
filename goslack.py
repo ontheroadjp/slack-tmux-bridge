@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 import os
 import sys
+import argparse
 import json
 import subprocess
 import tempfile
-from pathlib import Path
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 
 # Paths
-# Use realpath to resolve symlinks so we find config.json relative to the script, not the symlink
+# Use realpath to resolve symlinks so we find files relative to the script, not the symlink
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
 
@@ -59,60 +58,149 @@ def get_tmux_pane_id():
         print(f"Error getting tmux info: {e}")
         sys.exit(1)
 
-def expand_path(path):
-    """Expands ~ and env vars, and returns absolute path without trailing slash"""
-    return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
+
+def _get_slack_client():
+    if not SLACK_BOT_TOKEN:
+        print("❌ Error: SLACK_BOT_TOKEN not found in environment.")
+        sys.exit(1)
+    return WebClient(token=SLACK_BOT_TOKEN)
 
 def send_slack_message(channel, text):
     """Sends a message to Slack using WebClient"""
-    if not SLACK_BOT_TOKEN:
-        print("⚠️ Warning: SLACK_BOT_TOKEN not found. Skipping Slack notification.")
-        return
-    
     try:
-        client = WebClient(token=SLACK_BOT_TOKEN)
+        client = _get_slack_client()
         client.chat_postMessage(channel=channel, text=text)
     except Exception as e:
         print(f"⚠️ Warning: Failed to send Slack message: {e}")
 
+def _find_channel_by_name(client, name):
+    cursor = None
+    while True:
+        resp = client.conversations_list(
+            limit=1000,
+            cursor=cursor,
+            types="public_channel,private_channel"
+        )
+        for ch in resp.get("channels", []):
+            if ch.get("name") == name:
+                return ch
+        cursor = resp.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    return None
+
+def _normalize_session_entry(channel_id, value):
+    if isinstance(value, dict):
+        return {
+            "channel_id": channel_id,
+            "channel_name": value.get("name"),
+            "pane": value.get("pane"),
+            "dir": value.get("dir"),
+        }
+    return {
+        "channel_id": channel_id,
+        "channel_name": None,
+        "pane": value,
+        "dir": None,
+    }
+
+def _session_sort_key(entry):
+    name = entry.get("channel_name") or ""
+    if name.startswith("ai-studio-"):
+        try:
+            num = int(name.split("ai-studio-")[1])
+            return (0, num, name)
+        except ValueError:
+            return (1, 0, name)
+    return (1, 0, name)
+
+def _enumerate_sessions():
+    sessions = load_json(ACTIVE_SESSIONS_FILE)
+    entries = [_normalize_session_entry(ch_id, val) for ch_id, val in sessions.items()]
+    entries.sort(key=_session_sort_key)
+    return entries
+
+def list_sessions():
+    entries = _enumerate_sessions()
+    if not entries:
+        print("(no active sessions)")
+        return
+    lines = []
+    for i, entry in enumerate(entries, start=1):
+        name = entry["channel_name"] or "-"
+        pane = entry["pane"] or "-"
+        dir_path = entry["dir"] or "-"
+        lines.append(f"{i}\t{name}\t{pane}\t{dir_path}")
+    print("num\tchannel_name\tpane\tdir")
+    print("\n".join(lines))
+
+def remove_sessions_by_number(number):
+    entries = _enumerate_sessions()
+    if not entries:
+        print("(no active sessions)")
+        return
+    if number < 1 or number > len(entries):
+        print("Error: number out of range.")
+        sys.exit(1)
+
+    target = entries[number - 1]
+    sessions = load_json(ACTIVE_SESSIONS_FILE)
+    if target["channel_id"] in sessions:
+        del sessions[target["channel_id"]]
+        save_json(ACTIVE_SESSIONS_FILE, sessions)
+        name = target["channel_name"] or "-"
+        pane_val = target["pane"] or "-"
+        dir_val = target["dir"] or "-"
+        print(f"Removed: {number}\t{name}\t{pane_val}\t{dir_val}")
+    else:
+        print("Error: session not found.")
+        sys.exit(1)
+
+def _extract_pane(value):
+    if isinstance(value, dict):
+        return value.get("pane")
+    return value
+
 def main():
+    parser = argparse.ArgumentParser(description="Slack tmux bridge session helper")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("list", help="List active sessions")
+
+    rm_parser = subparsers.add_parser("rm", help="Remove a session by number")
+    rm_parser.add_argument("number", type=int, help="Session number from list")
+
+    args = parser.parse_args()
+
+    if args.command == "list":
+        list_sessions()
+        return
+    if args.command == "rm":
+        remove_sessions_by_number(args.number)
+        return
+
     # 1. Get current directory
     cwd = os.getcwd()
-    
-    # 2. Load config
-    raw_config = load_json(CONFIG_FILE)
-    
-    # Normalize config keys (expand vars, abspath)
-    config = {}
-    for k, v in raw_config.items():
-        # Skip empty keys
-        if not k: continue
-        # Expand and normalize path
-        norm_key = expand_path(k)
-        config[norm_key] = v
 
-    # 3. Find matching channel
-    target_channel = config.get(cwd)
-    
-    if not target_channel:
-        # Try finding if cwd is a subdirectory of a configured path
-        # Sort by length desc to find the most specific match
-        for registered_path in sorted(config.keys(), key=len, reverse=True):
-            # Check if cwd starts with registered_path AND the next char is a separator or end
-            # Using os.path.commonpath is safer but startswith is okay if we are careful
-            if cwd == registered_path or cwd.startswith(registered_path + os.sep):
-                 target_channel = config[registered_path]
-                 break
-    
-    if not target_channel:
-        print(f"❌ Error: No channel configured for this directory.")
+    # 2. Resolve channel ID by current directory name
+    client = _get_slack_client()
+    dir_name = os.path.basename(cwd)
+    channel = _find_channel_by_name(client, dir_name)
+    if not channel:
+        for fallback in ["ai-studio-01", "ai-studio-02", "ai-studio-03"]:
+            channel = _find_channel_by_name(client, fallback)
+            if channel:
+                break
+
+    if not channel:
+        print("❌ Error: No channel matched this directory name.")
         print(f"Current Directory: {cwd}")
-        print(f"Config File used:  {CONFIG_FILE}")
-        print("Loaded mappings:")
-        for k in config.keys():
-            print(f" - {k}")
-        print("\nPlease add your path to config.json")
+        print(f"Directory Name:    {dir_name}")
+        print("Tried fallbacks:   ai-studio-01, ai-studio-02, ai-studio-03")
         sys.exit(1)
+    
+    target_channel = channel.get("id")
+    target_channel_name = channel.get("name")
         
     # 4. Get Tmux Pane ID
     pane_id = get_tmux_pane_id()
@@ -120,17 +208,26 @@ def main():
     # 5. Update active sessions
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
     # Remove any other channels pointing to the same tmux pane
-    duplicates = [ch for ch, pane in active_sessions.items() if pane == pane_id and ch != target_channel]
+    duplicates = [
+        ch
+        for ch, pane in active_sessions.items()
+        if _extract_pane(pane) == pane_id and ch != target_channel
+    ]
     for dup in duplicates:
         del active_sessions[dup]
     
     # Map Channel -> Pane
-    active_sessions[target_channel] = pane_id
+    active_sessions[target_channel] = {"pane": pane_id, "dir": cwd, "name": target_channel_name}
     
     save_json(ACTIVE_SESSIONS_FILE, active_sessions)
     
     # 6. Send Slack Notification
-    send_slack_message(target_channel, "✅ 接続しました。このチャンネルからのメッセージはこの tmux ペインに送られます。")
+    send_slack_message(
+        target_channel,
+        "✅ 接続しました。"
+        f"\nディレクトリ: {cwd}"
+        "\nこのチャンネルからのメッセージはこの tmux ペインに送られます。"
+    )
     
     print(f"✅ Connected!")
     print(f"Directory: {cwd}")

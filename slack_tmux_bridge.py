@@ -154,10 +154,30 @@ def get_target_pane(channel_id: str) -> str:
         return None
     try:
         data = _load_active_sessions()
-        return data.get(channel_id)
+        value = data.get(channel_id)
+        return _normalize_tmux_target(value)
     except Exception as e:
         log(f"Error reading active sessions: {e}")
         return None
+
+def get_target_dir(channel_id: str) -> str:
+    """チャンネルIDに対応する接続ディレクトリを取得する。未接続なら None"""
+    if not os.path.exists(ACTIVE_SESSIONS_FILE):
+        return None
+    try:
+        data = _load_active_sessions()
+        value = data.get(channel_id)
+        if isinstance(value, dict):
+            return value.get("dir")
+        return None
+    except Exception as e:
+        log(f"Error reading active sessions: {e}")
+        return None
+
+def _normalize_tmux_target(value):
+    if isinstance(value, dict):
+        return value.get("pane")
+    return value
 
 # =====================
 # Slack App
@@ -580,12 +600,31 @@ def handle_message(event, logger):
                 text=f"⚠️ 切断中にエラーが発生しました: {e}"
             )
         return
+    
+    # =====================
+    # Command: /dir (Show connected directory)
+    # =====================
+    if text == "/dir":
+        target_dir = get_target_dir(channel_id)
+        if target_dir:
+            app.client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=event["ts"],
+                text=f"📁 接続中のディレクトリ: {target_dir}"
+            )
+        else:
+            app.client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=event["ts"],
+                text="⚠️ 接続中のディレクトリ情報が見つかりません。"
+            )
+        return
 
     # =====================
     # Active Session Check
     # =====================
     # Check if this channel has an active tmux session
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
     if not tmux_target:
         # Ignore messages from unconfigured channels
         return
@@ -962,10 +1001,27 @@ def handle_sessions_message(message, say):
 
     now = time.time()
     lines = ["Active sessions:"]
-    for channel_id, tmux_target in sessions.items():
+    for channel_id, value in sessions.items():
         last_ts = LAST_EVENT_TS_BY_CHANNEL.get(channel_id, 0)
         age = _format_age(now - last_ts) if last_ts else "never"
-        lines.append(f"- {channel_id} -> {tmux_target} (last event: {age} ago)")
+        if isinstance(value, dict):
+            tmux_target = value.get("pane")
+            target_dir = value.get("dir")
+            channel_name = value.get("name")
+        else:
+            tmux_target = value
+            target_dir = None
+            channel_name = None
+        if target_dir:
+            if channel_name:
+                lines.append(f"- {channel_id} ({channel_name}) -> {tmux_target} ({target_dir}) (last event: {age} ago)")
+            else:
+                lines.append(f"- {channel_id} -> {tmux_target} ({target_dir}) (last event: {age} ago)")
+        else:
+            if channel_name:
+                lines.append(f"- {channel_id} ({channel_name}) -> {tmux_target} (last event: {age} ago)")
+            else:
+                lines.append(f"- {channel_id} -> {tmux_target} (last event: {age} ago)")
     say(text="```\n" + "\n".join(lines) + "\n```")
 
 # =====================

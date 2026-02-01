@@ -7,7 +7,6 @@ def test_plist_uses_env_python3_and_tmux_bin():
     assert "TMUX_BIN=" in plist
     assert "<string>python3</string>" in plist
     assert "slack_tmux_bridge.py" in plist
-    assert "run_slack_bridge.sh" not in plist
     assert "slack_tmux_bridge.log" in plist
 
 

@@ -118,7 +118,6 @@ python goslack.py rm 4
 chmod +x send_enter.sh
 ```
 
-- `run_slack_bridge.sh` は廃止し、launchd から `python3` を直接起動します。
 
 ### 5. macOS Launchd（任意）
 
@@ -204,7 +203,6 @@ python slack_tmux_bridge.py
 
 - `LOG_LEVEL=DEBUG` で Socket Mode やヘルス関連のログを `bot.log` に出力。
 - `OUTPUT_DIFF_MODE` を切り替えて差分抽出の挙動を試す。
-- `run_slack_bridge.sh` は不要になりました（launchd から `python3` を直接起動します）。
 
 ### 4. Slack の手順
 
@@ -239,6 +237,30 @@ python slack_tmux_bridge.py
 - `/now`: 監視を再開し、最新の Gemini 出力を取得。
 - `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。`list`/`rm`（番号指定）や `--add` で管理可能。
 
+## Tips
+
+### 終了時に自動でマッピング解除するラッパー（例）
+
+Gemini 起動用のラッパーに `trap` を入れておくと、終了時にマッピングを解除し、Slack に通知できます。下記は要点のみの例です（必要なら独自の事前チェックを追加してください）。
+
+```bash
+gemini() {
+  goslack
+  trap '
+    if [ -n "$TMUX" ]; then
+      pane_id=$(tmux display-message -p "#{pane_id}" 2>/dev/null)
+      if [ -n "$pane_id" ]; then
+        num=$(python goslack.py list | awk -v pid="$pane_id" "NR>1 && \\$4==pid {print \\$1; exit}")
+        if [ -n "$num" ]; then
+          python goslack.py rm "$num" --notify "gemini が終了したためマッピングを解除しました。"
+        fi
+      fi
+    fi
+  ' RETURN
+  command gemini "$@"
+}
+```
+
 出力例（`/sessions`）:
 
 ```
@@ -251,4 +273,3 @@ python slack_tmux_bridge.py
 ```
 📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
 ```
-- `run_slack_bridge.sh`: 旧ラッパー（現在は未使用）。

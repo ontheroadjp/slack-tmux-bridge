@@ -28,7 +28,6 @@
 | `slack_tmux_bridge.py` | Slackイベントを受け、tmuxに入力し、結果を監視/返信するメインブリッジ |
 | `goslack.py` | tmux ペインと Slack チャンネルの対応表を書き込む |
 | `send_enter.sh` | tmux に Enter を送る最小ヘルパ |
-| `run_slack_bridge.sh` | 旧ラッパー（現在は未使用） |
 | `active_sessions.json` | Slack チャンネルID → pane_id/ペイン/ディレクトリ/チャンネル名のマッピング |
 | `tmp/` | スナップショット保存、PID ファイルなど |
 
@@ -241,7 +240,6 @@ python goslack.py rm 4
 ├── slack_tmux_bridge.py  # ブリッジ本体
 ├── goslack.py            # チャンネル→ペイン登録
 ├── send_enter.sh         # Enter送信ヘルパ
-├── run_slack_bridge.sh   # 旧ラッパー（現在は未使用）
 ├── active_sessions.json  # チャンネル→pane_id/ペイン/ディレクトリ/チャンネル名対応表
 ├── tmp/                  # スナップショット/ PID
 └── docs/

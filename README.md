@@ -118,7 +118,6 @@ python goslack.py rm 4
 chmod +x send_enter.sh
 ```
 
-- `run_slack_bridge.sh` loads `.env` before launching the bridge; it is used for macOS `launchd`.
 
 ### 5. Optional macOS Launchd deployment
 
@@ -204,7 +203,6 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 
 - Set `LOG_LEVEL=DEBUG` to capture Bolt/Socket Mode state and health logs.
 - Toggle `OUTPUT_DIFF_MODE` to test the old/new diff extraction behavior.
-- Use `run_slack_bridge.sh` if you intend to run under `launchd`.
 
 ### 4. Slack operations
 
@@ -230,7 +228,7 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 
 1. **Minimal**: Run `slack_tmux_bridge.py` directly after configuring `.env`. Good for trial runs.
 2. **Recommended**: Always run `goslack.py` from each tmux pane to keep `active_sessions.json` accurate, then start the bridge. Keeps multiple channels/panes organized.
-3. **Daemon**: Use `run_slack_bridge.sh` with macOS `launchd` for persistent operation and auto-restarts. Continue to manage mappings via `goslack.py`.
+3. **Daemon**: Use macOS `launchd` for persistent operation and auto-restarts. Continue to manage mappings via `goslack.py`.
 
 ## Utilities
 
@@ -238,6 +236,30 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 - `/dir`: Slack command that returns the connected directory.
 - `/now`: Slack command that re-runs monitoring to fetch the latest Gemini output.
 - `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered) and `--add` for session maintenance.
+
+## Tips
+
+### Wrapper with automatic unmap on exit (example)
+
+If you launch Gemini from a wrapper, you can add a `trap` so that when Gemini exits the mapping is removed and Slack is notified. The example below shows only the essential parts; add your own pre-checks if needed.
+
+```bash
+gemini() {
+  goslack
+  trap '
+    if [ -n "$TMUX" ]; then
+      pane_id=$(tmux display-message -p "#{pane_id}" 2>/dev/null)
+      if [ -n "$pane_id" ]; then
+        num=$(python goslack.py list | awk -v pid="$pane_id" "NR>1 && \\$4==pid {print \\$1; exit}")
+        if [ -n "$num" ]; then
+          python goslack.py rm "$num" --notify "gemini exited, mapping removed."
+        fi
+      fi
+    fi
+  ' RETURN
+  command gemini "$@"
+}
+```
 
 Example (`/sessions` output):
 
@@ -251,4 +273,3 @@ Example (`/dir` output):
 ```
 📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
 ```
-- `run_slack_bridge.sh`: Loads `.env` before launching the core bridge script (used by `launchd`).

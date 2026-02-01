@@ -178,7 +178,7 @@ def list_sessions():
     print("num\tchannel_name\tpane\tpane_id\tdir")
     print("\n".join(lines))
 
-def remove_sessions_by_number(number):
+def remove_sessions_by_number(number, notify_message=None):
     entries = _enumerate_sessions()
     if not entries:
         print("(no active sessions)")
@@ -197,6 +197,8 @@ def remove_sessions_by_number(number):
         pane_id_val = target.get("pane_id") or "-"
         dir_val = target["dir"] or "-"
         print(f"Removed: {number}\t{name}\t{pane_val}\t{pane_id_val}\t{dir_val}")
+        if notify_message:
+            send_slack_message(target["channel_id"], notify_message)
     else:
         print("Error: session not found.")
         sys.exit(1)
@@ -283,6 +285,11 @@ def main():
 
     rm_parser = subparsers.add_parser("rm", help="Remove a session by number")
     rm_parser.add_argument("number", type=int, help="Session number from list")
+    rm_parser.add_argument(
+        "--notify",
+        metavar="MESSAGE",
+        help="Post a Slack message to the removed channel",
+    )
     parser.add_argument("--add", metavar="PANE", help="Register a target tmux pane (e.g., 1:2.0)")
 
     args = parser.parse_args()
@@ -291,7 +298,7 @@ def main():
         list_sessions()
         return
     if args.command == "rm":
-        remove_sessions_by_number(args.number)
+        remove_sessions_by_number(args.number, notify_message=args.notify)
         return
 
     # 1. Get current directory (or target pane directory)
@@ -329,12 +336,12 @@ def main():
     # 6. Send Slack Notification
     send_slack_message(
         target_channel,
-        "✅ 接続しました。"
+        "✅ マッピングしました。"
         f"\nディレクトリ: {cwd}"
         "\nこのチャンネルからのメッセージはこの tmux ペインに送られます。"
     )
     
-    print(f"✅ Connected!")
+    print("✅ Mapped!")
     print(f"Directory: {cwd}")
     print(f"Channel:   {target_channel}")
     print(f"Tmux Pane: {pane_target}")

@@ -11,9 +11,10 @@
 - **コマンドフィルタ**: allowlist + denylist ルールと、デフォルトで `rm` をブロックする仕組み。
 - **単一起動ガード**: PID ファイルで Socket Mode の二重接続を防ぎます。
 - **ヘルス監視**: キャッシュ/スナップショットを定期クリーンし、イベント停止をログ・通知・再起動で検出。
-- **セッション可視化**: `/sessions` でチャンネルと tmux ペインの対応、最終イベント時刻（チャンネル名があれば併記）を確認できます。
+- **セッション可視化**: `/sessions` で接続中のチャンネル名とディレクトリを一覧表示できます。
 - **アイドル通知**: チャンネルが無反応の状態が続いたら定期的に通知します。
 - **重複クリーンアップ**: 同一ペインの重複登録を定期検知し、片方を切断して通知します。
+- **不一致ガード**: 保存済みペインと現在のペインが違う場合、確認して更新または切断します。
 
 ## 要件
 
@@ -85,8 +86,8 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 - 同じ tmux ペインを指す別チャネルがあれば、起動時に削除されて現在のチャネルだけが残る仕組みです。
 - チャンネルは「作業ディレクトリ名 = チャンネル名」で解決され、見つからない場合は `ai-studio-01/02/03` にフォールバックします。
   - 未使用の `ai-studio-*` を優先し、すべて使用中なら `01 → 02 → 03 → 01 ...` でローテーションします。
-- `active_sessions.json` には `pane`, `dir`, `name`（チャンネル名）を保存します。
-- `goslack.py list` で番号付き一覧を表示し、`goslack.py rm <番号>` で削除します。
+- `active_sessions.json` には `pane_id`, `pane`, `dir`, `name`（チャンネル名）を保存します。
+- `goslack.py list` で番号付き一覧を表示し（`pane_id` も表示）、`goslack.py rm <番号>` で削除します。
 - `goslack.py --add <pane>` で別ペインから指定ペインを登録できます（対象ペインの作業ディレクトリを利用）。
   - 並び順: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` が先頭（番号順）、それ以外が続きます。
   - `ai-studio` 以外はチャンネル名の昇順。名前が無い場合は `-` と表示されます。
@@ -95,11 +96,11 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 出力例（`goslack.py list`）:
 
 ```
-num	channel_name	pane	dir
-1	ai-studio-01	1:1.0	/Users/you/WORKSPACE/ai-studio-01
-2	ai-studio-02	1:2.0	/Users/you/WORKSPACE/ai-studio-02
-3	ai-studio-03	1:3.0	/Users/you/WORKSPACE/ai-studio-03
-4	project-x	2:0.0	/Users/you/WORKSPACE/project-x
+num	channel_name	pane	pane_id	dir
+1	ai-studio-01	1:1.0	%1	/Users/you/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	%2	/Users/you/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	%3	/Users/you/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	%4	/Users/you/WORKSPACE/project-x
 ```
 
 削除例:
@@ -173,6 +174,7 @@ cp .env.sample .env
 
 1. `tmux new-session -s gemini` などで Gemini を起動。
 2. 対象ペイン内で `python goslack.py` を実行し、チャンネルとペインの対応を `active_sessions.json` に書き込みます。チャンネルは作業ディレクトリ名から解決し、見つからない場合は `ai-studio-01/02/03` にフォールバックします。他のチャンネルが同じペインを参照している場合は自動で削除されます。
+   - `goslack.py` は `pane_id` を保存し、送信時に現在のターゲットへ解決するため、ウインドウ番号の変更でも誤送信しません。
    - ペインが既に占有されている場合は、別ペインから `python goslack.py --add 1:2.0` を実行して登録できます。
 
 ### 3. ブリッジを起動
@@ -193,10 +195,11 @@ python slack_tmux_bridge.py
 1. チャンネルにメッセージを送信。
    - テキスト: 表示される「実行（Enter）」で確定。
    - 数字のみ: 自動で実行されます。
-   - `/sessions`（または `\/sessions`）で現在のマッピングと最終イベント時刻を表示。
+   - `/sessions`（または `\/sessions`）で接続中のチャンネル名とディレクトリを表示。
    - `/dir`（または `\/dir`）で接続中ディレクトリを表示。
    - `/now`（または `\/now`）で「監視を継続」と同じ処理を実行し、最新状態を取得。
-2. ブリッジは Gemini の出力完了を待ってスレッドで返信します（3,000文字ごとに分割）。3 秒無変化なら完了として投稿します。
+   - `pane_id` から解決したペインが保存値と異なる場合、確認メッセージが出ます。
+2. ブリッジは Gemini の出力完了を待ってスレッドで返信します（3,000文字ごとに分割）。3 秒無変化なら完了として投稿します。監視は 180 秒でタイムアウトします。
 
 ### 5. ヘルス監視
 
@@ -215,7 +218,7 @@ python slack_tmux_bridge.py
 
 ## ユーティリティ
 
-- `/sessions`: マッピングと最終イベント年齢（チャンネル名があれば併記）を表示。
+- `/sessions`: 接続中のチャンネル名とディレクトリを一覧表示。
 - `/dir`: 接続中ディレクトリを表示。
 - `/now`: 監視を再開し、最新の Gemini 出力を取得。
 - `goslack.py`: 現在の tmux ペインにチャンネルを紐づけ、同一ペインの古い記録を削除。`list`/`rm`（番号指定）や `--add` で管理可能。
@@ -223,9 +226,8 @@ python slack_tmux_bridge.py
 出力例（`/sessions`）:
 
 ```
-Active sessions:
-- C0ABWS7U8E6 (ai-studio-01) -> 1:1.0 (/Users/you/WORKSPACE/ai-studio-01) (last event: 12s ago)
-- C0XYZ123456 (project-x) -> 2:0.0 (/Users/you/WORKSPACE/project-x) (last event: 3m ago)
+- ai-studio-01 → /Users/you/WORKSPACE/ai-studio-01
+- project-x → /Users/you/WORKSPACE/project-x
 ```
 
 出力例（`/dir`）:

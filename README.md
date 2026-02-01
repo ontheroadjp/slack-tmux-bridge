@@ -11,9 +11,10 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless explicitly escaped.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
 - **Health monitoring**: Workers prune old snapshots/prompts and detect stalled event streams, with optional warnings or self-restart actions.
-- **Session visibility**: `/sessions` command shows which Slack channel maps to which tmux pane plus the last activity age (and channel name when available).
+- **Session visibility**: `/sessions` command lists connected channel names and directories.
 - **Idle ping**: Per-channel idle notifications when no messages arrive for a while.
 - **Duplicate cleanup**: Periodically detects duplicate pane mappings and disconnects the older one with a notice.
+- **Mismatch guard**: If a pane changes, the bridge prompts before sending and can update or disconnect.
 
 ## Requirements
 
@@ -83,8 +84,8 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 
 - `goslack.py` writes `active_sessions.json` atomically, avoiding partial writes.
 - If another Slack channel already points to the same tmux pane, running `goslack.py` removes the stale entry so only the current channel remains.
-- `active_sessions.json` stores `pane`, `dir`, and `name` (channel name) per channel ID.
-- `goslack.py list` prints numbered mappings; `goslack.py rm <number>` removes a mapping by its list number.
+- `active_sessions.json` stores `pane_id`, `pane`, `dir`, and `name` (channel name) per channel ID.
+- `goslack.py list` prints numbered mappings (including `pane_id`); `goslack.py rm <number>` removes a mapping by its list number.
 - `goslack.py --add <pane>` registers a target tmux pane from another pane (uses the target pane’s current directory).
   - Ordering rules: `ai-studio-01`, `ai-studio-02`, `ai-studio-03` come first (in numeric order), then all other channels.
   - For non ai-studio channels, ordering is by channel name (ascending). Channels without a name appear as `-`.
@@ -93,11 +94,11 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 Example (`goslack.py list`):
 
 ```
-num	channel_name	pane	dir
-1	ai-studio-01	1:1.0	/Users/you/WORKSPACE/ai-studio-01
-2	ai-studio-02	1:2.0	/Users/you/WORKSPACE/ai-studio-02
-3	ai-studio-03	1:3.0	/Users/you/WORKSPACE/ai-studio-03
-4	project-x	2:0.0	/Users/you/WORKSPACE/project-x
+num	channel_name	pane	pane_id	dir
+1	ai-studio-01	1:1.0	%1	/Users/you/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	%2	/Users/you/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	%3	/Users/you/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	%4	/Users/you/WORKSPACE/project-x
 ```
 
 Example removal:
@@ -173,6 +174,7 @@ Edit `.env` with your Slack tokens and optional tuning values documented above.
 
 1. Start Gemini inside a tmux pane (`tmux new-session -s gemini`, run `gemini`).
 2. Inside that pane, run `python goslack.py` to register the channel ↔ pane mapping. `goslack.py` resolves the Slack channel by the current directory name; if not found, it falls back to `ai-studio-01/02/03` in order. It also automatically removes any other channel that referenced the same pane.
+   - `goslack.py` stores `pane_id` and resolves the current pane target at runtime, so window number changes won’t cause misrouting.
    - If the target pane is already occupied, run `python goslack.py --add 1:2.0` from another pane to register it by tmux target.
 
 ### 3. Run the bridge
@@ -193,10 +195,11 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 1. Send a message to the configured channel.
    - Text requires pressing the “Execute (Enter)” button that appears in the thread.
    - Numeric-only messages send automatically.
-   - `text == "/sessions"` (or `\/sessions`) shows the active mappings and last event times.
+   - `text == "/sessions"` (or `\/sessions`) shows connected channel names and directories.
    - `text == "/dir"` (or `\/dir`) shows the connected directory for the channel.
    - `text == "/now"` (or `\/now`) triggers the same logic as “Continue monitoring” to fetch the latest Gemini state.
-2. The bridge monitors Gemini and replies in the thread, chunking long outputs into 3,000-character pieces. If output stays unchanged for ~3 seconds, it is treated as complete and posted.
+   - If the saved pane target differs from the current pane resolved via `pane_id`, the bridge prompts to confirm updating the connection before running.
+2. The bridge monitors Gemini and replies in the thread, chunking long outputs into 3,000-character pieces. If output stays unchanged for ~3 seconds, it is treated as complete and posted. The monitor times out after 180 seconds.
 
 ### 5. Health monitoring
 
@@ -215,7 +218,7 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 
 ## Utilities
 
-- `/sessions`: Slack command that posts a table of channel-to-pane mappings plus the age of the last event (and channel name when available).
+- `/sessions`: Slack command that posts a list of channel names and connected directories.
 - `/dir`: Slack command that returns the connected directory.
 - `/now`: Slack command that re-runs monitoring to fetch the latest Gemini output.
 - `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered) and `--add` for session maintenance.
@@ -223,9 +226,8 @@ Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pan
 Example (`/sessions` output):
 
 ```
-Active sessions:
-- C0ABWS7U8E6 (ai-studio-01) -> 1:1.0 (/Users/you/WORKSPACE/ai-studio-01) (last event: 12s ago)
-- C0XYZ123456 (project-x) -> 2:0.0 (/Users/you/WORKSPACE/project-x) (last event: 3m ago)
+- ai-studio-01 → /Users/you/WORKSPACE/ai-studio-01
+- project-x → /Users/you/WORKSPACE/project-x
 ```
 
 Example (`/dir` output):

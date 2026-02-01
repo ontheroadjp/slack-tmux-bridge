@@ -29,7 +29,7 @@
 | `goslack.py` | tmux ペインと Slack チャンネルの対応表を書き込む |
 | `send_enter.sh` | tmux に Enter を送る最小ヘルパ |
 | `run_slack_bridge.sh` | `.env` を読み込んでブリッジを起動するラッパ |
-| `active_sessions.json` | Slack チャンネルID → tmux ターゲット/ディレクトリ/チャンネル名のマッピング |
+| `active_sessions.json` | Slack チャンネルID → pane_id/ペイン/ディレクトリ/チャンネル名のマッピング |
 | `tmp/` | スナップショット保存、PID ファイルなど |
 
 ---
@@ -59,12 +59,13 @@
 ## 4. マッピング管理（goslack.py）
 
 ### 4.1 役割
-- **現在の tmux ペイン**を取得し、`active_sessions.json` に**Slack チャンネルとの対応**を書き込む（`pane`, `dir`, `name` を保持）。
+- **現在の tmux ペイン**を取得し、`active_sessions.json` に**Slack チャンネルとの対応**を書き込む（`pane_id`, `pane`, `dir`, `name` を保持）。
+- `pane_id` が送信時の**唯一の識別子**で、`pane` は表示・参考用（古くなっても送信先は `pane_id` から解決される）。
 - 同一ペインを指す他チャンネルのエントリは**自動で削除**。
 
 ### 4.2 フロー
 1. 現在の作業ディレクトリ名（= Slack チャンネル名）を Slack API で解決し、該当チャンネルIDを取得する。見つからない場合は `ai-studio-01/02/03` をフォールバックとして解決する（未使用を優先、すべて使用中なら `01 → 02 → 03 → 01 ...` でローテーション）。
-2. `tmux display-message` で `session:window.pane` を取得。
+2. `tmux display-message` で `pane_id` と `session:window.pane` を取得。
 3. 既存の `active_sessions.json` から同一ペインの他エントリを削除。
 4. 新しいチャンネル→ペインを登録（atomic 書き込み）。`dir` と `name`（チャンネル名）も保存する。
 5. Slack に「接続しました」通知を送信。
@@ -76,7 +77,7 @@
 ---
 
 ### 4.4 サブコマンド
-- `goslack.py list`: `active_sessions.json` の一覧を番号付きで表示（`num`, `channel_name`, `pane`, `dir`）。
+- `goslack.py list`: `active_sessions.json` の一覧を番号付きで表示（`num`, `channel_name`, `pane`, `pane_id`, `dir`）。
 - `goslack.py rm <number>`: 一覧の番号を指定して削除。
  - `goslack.py --add <pane>`: 別ペインから指定ペインを登録（対象ペインの `pane_current_path` を利用）。
   - 並び順は `ai-studio-01/02/03` が先頭（番号順）、それ以外はチャンネル名の昇順。
@@ -86,11 +87,11 @@
 #### 4.4.1 `list` の出力例
 
 ```
-num	channel_name	pane	dir
-1	ai-studio-01	1:1.0	/Users/you/WORKSPACE/ai-studio-01
-2	ai-studio-02	1:2.0	/Users/you/WORKSPACE/ai-studio-02
-3	ai-studio-03	1:3.0	/Users/you/WORKSPACE/ai-studio-03
-4	project-x	2:0.0	/Users/you/WORKSPACE/project-x
+num	channel_name	pane	pane_id	dir
+1	ai-studio-01	1:1.0	%1	/Users/you/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	%2	/Users/you/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	%3	/Users/you/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	%4	/Users/you/WORKSPACE/project-x
 ```
 
 #### 4.4.2 `rm` の例
@@ -108,8 +109,11 @@ python goslack.py rm 4
   - bot 由来は除外（`bot_id` を見て除外）。
 - `/bye` は特別扱いで接続解除する。
 - `/dir` は接続中ディレクトリを返す（記録がある場合）。
+- `/sessions` は接続中のチャンネル名とディレクトリの一覧を返す。
 - `/now` は「監視を継続」と同じ処理で、最新の Gemini 出力を取得する。
 - `active_sessions.json` に登録がないチャンネルは**無視**。
+- 送信時は `pane_id` から現在の `session:window.pane` を解決し、解決できない場合は送信しない（誤送信防止）。
+- `pane_id` から解決した `pane` が保存値と異なる場合、確認ボタンを提示し、OK で更新して実行／キャンセルで切断する。
 
 ### 5.2 コマンドフィルタ
 - **denylist優先**。正規表現 `/.../` に対応。
@@ -169,7 +173,7 @@ python goslack.py rm 4
 - 3,000 文字で分割し、区切り線は長すぎる場合短縮。
 
 ### 7.4 タイムアウトと継続
-- 60 秒経過でタイムアウト。
+- 180 秒経過でタイムアウト。
 - 途中経過は送らず「継続監視」ボタンだけ表示。
 - `continue_monitor` ボタンでスナップショットを読み込んで再監視。
 
@@ -237,7 +241,7 @@ python goslack.py rm 4
 ├── goslack.py            # チャンネル→ペイン登録
 ├── send_enter.sh         # Enter送信ヘルパ
 ├── run_slack_bridge.sh   # .env ローダ
-├── active_sessions.json  # チャンネル→ペイン/ディレクトリ/チャンネル名対応表
+├── active_sessions.json  # チャンネル→pane_id/ペイン/ディレクトリ/チャンネル名対応表
 ├── tmp/                  # スナップショット/ PID
 └── docs/
     └── specification.md  # 本仕様書
@@ -248,9 +252,8 @@ python goslack.py rm 4
 ### 13.1 `/sessions`
 
 ```
-Active sessions:
-- C0ABWS7U8E6 (ai-studio-01) -> 1:1.0 (/Users/you/WORKSPACE/ai-studio-01) (last event: 12s ago)
-- C0XYZ123456 (project-x) -> 2:0.0 (/Users/you/WORKSPACE/project-x) (last event: 3m ago)
+- ai-studio-01 → /Users/you/WORKSPACE/ai-studio-01
+- project-x → /Users/you/WORKSPACE/project-x
 ```
 
 ### 13.2 `/dir`

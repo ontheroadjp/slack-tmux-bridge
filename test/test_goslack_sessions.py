@@ -24,9 +24,9 @@ def test_list_sessions_prints_entries(tmp_path, monkeypatch, capsys):
     goslack.list_sessions()
     out = capsys.readouterr().out
 
-    assert "num\tchannel_name\tpane\tdir" in out
-    assert "1\t-\t0:0.0\t-" in out
-    assert "2\tchan-a\t1:1.0\t/tmp/a" in out
+    assert "num\tchannel_name\tpane\tpane_id\tdir" in out
+    assert "1\t-\t0:0.0\t-\t-" in out
+    assert "2\tchan-a\t1:1.0\t-\t/tmp/a" in out
 
 
 def test_remove_by_number(tmp_path, monkeypatch):

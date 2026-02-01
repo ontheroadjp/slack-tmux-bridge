@@ -26,10 +26,10 @@ def test_cli_list_outputs_table_with_numbers(tmp_path, monkeypatch, capsys):
     goslack.main()
 
     out = capsys.readouterr().out
-    assert "num\tchannel_name\tpane\tdir" in out
-    assert "1\tai-studio-01\t1:1.0\t/tmp/a" in out
-    assert "2\tai-studio-02\t1:2.0\t/tmp/b" in out
-    assert "3\tzzz\t9:9.9\t/tmp/z" in out
+    assert "num\tchannel_name\tpane\tpane_id\tdir" in out
+    assert "1\tai-studio-01\t1:1.0\t-\t/tmp/a" in out
+    assert "2\tai-studio-02\t1:2.0\t-\t/tmp/b" in out
+    assert "3\tzzz\t9:9.9\t-\t/tmp/z" in out
 
 
 def test_cli_rm_by_number(tmp_path, monkeypatch):

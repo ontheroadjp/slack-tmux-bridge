@@ -45,18 +45,42 @@ def save_json(path, data):
             pass
 
 def get_tmux_pane_id():
-    """Returns the current tmux pane ID (e.g., %0, %1) or target format (e.g. session:window.pane)"""
+    """Returns the current tmux pane ID (e.g., %0, %1)"""
     try:
         # Check if we are in tmux
         if not os.environ.get("TMUX"):
             print("Error: This script must be run inside a tmux session.")
             sys.exit(1)
             
+        cmd = ["tmux", "display-message", "-p", "#{pane_id}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error getting tmux info: {e}")
+        sys.exit(1)
+
+
+def get_tmux_target():
+    """Returns the current tmux target (e.g., session:window.pane)"""
+    try:
+        if not os.environ.get("TMUX"):
+            print("Error: This script must be run inside a tmux session.")
+            sys.exit(1)
         cmd = ["tmux", "display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
         print(f"Error getting tmux info: {e}")
+        sys.exit(1)
+
+
+def get_tmux_pane_id_from_target(tmux_target):
+    try:
+        cmd = ["tmux", "display-message", "-p", "-t", tmux_target, "#{pane_id}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error getting tmux pane id: {e}")
         sys.exit(1)
 
 def get_tmux_pane_cwd(tmux_target):
@@ -109,12 +133,14 @@ def _normalize_session_entry(channel_id, value):
             "channel_id": channel_id,
             "channel_name": value.get("name"),
             "pane": value.get("pane"),
+            "pane_id": value.get("pane_id"),
             "dir": value.get("dir"),
         }
     return {
         "channel_id": channel_id,
         "channel_name": None,
         "pane": value,
+        "pane_id": None,
         "dir": None,
     }
 
@@ -143,9 +169,10 @@ def list_sessions():
     for i, entry in enumerate(entries, start=1):
         name = entry["channel_name"] or "-"
         pane = entry["pane"] or "-"
+        pane_id = entry.get("pane_id") or "-"
         dir_path = entry["dir"] or "-"
-        lines.append(f"{i}\t{name}\t{pane}\t{dir_path}")
-    print("num\tchannel_name\tpane\tdir")
+        lines.append(f"{i}\t{name}\t{pane}\t{pane_id}\t{dir_path}")
+    print("num\tchannel_name\tpane\tpane_id\tdir")
     print("\n".join(lines))
 
 def remove_sessions_by_number(number):
@@ -164,15 +191,16 @@ def remove_sessions_by_number(number):
         save_json(ACTIVE_SESSIONS_FILE, sessions)
         name = target["channel_name"] or "-"
         pane_val = target["pane"] or "-"
+        pane_id_val = target.get("pane_id") or "-"
         dir_val = target["dir"] or "-"
-        print(f"Removed: {number}\t{name}\t{pane_val}\t{dir_val}")
+        print(f"Removed: {number}\t{name}\t{pane_val}\t{pane_id_val}\t{dir_val}")
     else:
         print("Error: session not found.")
         sys.exit(1)
 
 def _extract_pane(value):
     if isinstance(value, dict):
-        return value.get("pane")
+        return value.get("pane_id") or value.get("pane")
     return value
 
 def _rr_state_path():
@@ -226,17 +254,22 @@ def _resolve_channel(client, dir_name, active_sessions):
             return channel
     return None
 
-def _register_session(target_channel, target_channel_name, pane_id, cwd):
+def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd):
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
     duplicates = [
         ch
         for ch, pane in active_sessions.items()
-        if _extract_pane(pane) == pane_id and ch != target_channel
+        if _extract_pane(pane) in {pane_id, pane_target} and ch != target_channel
     ]
     for dup in duplicates:
         del active_sessions[dup]
 
-    active_sessions[target_channel] = {"pane": pane_id, "dir": cwd, "name": target_channel_name}
+    active_sessions[target_channel] = {
+        "pane": pane_target,
+        "pane_id": pane_id,
+        "dir": cwd,
+        "name": target_channel_name
+    }
     save_json(ACTIVE_SESSIONS_FILE, active_sessions)
 
 def main():
@@ -260,8 +293,9 @@ def main():
 
     # 1. Get current directory (or target pane directory)
     if args.add:
-        pane_id = args.add
-        cwd = get_tmux_pane_cwd(pane_id)
+        pane_target = args.add
+        pane_id = get_tmux_pane_id_from_target(pane_target)
+        cwd = get_tmux_pane_cwd(pane_target)
     else:
         cwd = os.getcwd()
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
@@ -284,9 +318,10 @@ def main():
     # 4. Get Tmux Pane ID
     if not args.add:
         pane_id = get_tmux_pane_id()
+        pane_target = get_tmux_target()
     
     # 5. Update active sessions
-    _register_session(target_channel, target_channel_name, pane_id, cwd)
+    _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd)
     
     # 6. Send Slack Notification
     send_slack_message(
@@ -299,7 +334,7 @@ def main():
     print(f"✅ Connected!")
     print(f"Directory: {cwd}")
     print(f"Channel:   {target_channel}")
-    print(f"Tmux Pane: {pane_id}")
+    print(f"Tmux Pane: {pane_target}")
     print(f"Gemini bridge is now listening to {target_channel} and forwarding to this pane.")
 
 if __name__ == "__main__":

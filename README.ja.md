@@ -58,6 +58,7 @@ cp .env.sample .env
 - `SLACK_APP_TOKEN`: `xapp-…` Socket Mode 用 App トークン
 - `TARGET_CHANNEL_ID`: 旧設定（現行実装では未使用）
 - `LOG_LEVEL`: ロギングレベル（`INFO`, `DEBUG` など）
+- `TMUX_BIN`: tmux の絶対パス。PATH に `tmux` が無い場合（launchd など）に必要。
 - `OUTPUT_DIFF_MODE`: 出力差分方式（`replace` または `suffix`）
 - `EVENT_HEALTH_TIMEOUT`: 指定秒数イベントがこなければ警告（`0` で無効）
 - `EVENT_HEALTH_ACTION`: ヘルスチェックの挙動（`log`, `exit`, `restart`）
@@ -117,11 +118,11 @@ python goslack.py rm 4
 chmod +x send_enter.sh
 ```
 
-- `run_slack_bridge.sh` は `.env` を読み込むラッパーで、macOS `launchd` との相性を良くします。
+- `run_slack_bridge.sh` は廃止し、launchd から `python3` を直接起動します。
 
 ### 5. macOS Launchd（任意）
 
-`~/Library/LaunchAgents/com.slack_tmux_bridge.plist` に次のような内容を置きます。
+このリポジトリには `launchd/com.slack_tmux_bridge.plist` を同梱しています。`~/Library/LaunchAgents` にコピーし、必要に応じてパスを修正してください。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -132,7 +133,10 @@ chmod +x send_enter.sh
   <string>com.slack_tmux_bridge</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/WORKSPACE/slack_tmux_bridge/run_slack_bridge.sh</string>
+    <string>/usr/bin/env</string>
+    <string>TMUX_BIN=/usr/local/bin/tmux</string>
+    <string>python3</string>
+    <string>/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -146,11 +150,23 @@ chmod +x send_enter.sh
 </plist>
 ```
 
-環境に合わせてパスを修正し、次のコマンドで起動/停止します:
+環境に合わせてパスを修正し、次のコマンドでコピー・起動/停止します:
 
 ```bash
+cp launchd/com.slack_tmux_bridge.plist ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
 launchctl load ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
 launchctl unload ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
+```
+
+補助スクリプトも利用できます:
+
+```bash
+./launchd/launchd_ctl.sh install
+./launchd/launchd_ctl.sh start
+./launchd/launchd_ctl.sh stop
+./launchd/launchd_ctl.sh restart
+./launchd/launchd_ctl.sh status
+./launchd/launchd_ctl.sh log
 ```
 
 `launchctl list | grep slack_tmux_bridge` で状態を確認できます。
@@ -188,7 +204,7 @@ python slack_tmux_bridge.py
 
 - `LOG_LEVEL=DEBUG` で Socket Mode やヘルス関連のログを `bot.log` に出力。
 - `OUTPUT_DIFF_MODE` を切り替えて差分抽出の挙動を試す。
-- `run_slack_bridge.sh` は Launchd で使う場合にのみ必要です。
+- `run_slack_bridge.sh` は不要になりました（launchd から `python3` を直接起動します）。
 
 ### 4. Slack の手順
 
@@ -214,7 +230,7 @@ python slack_tmux_bridge.py
 
 1. **最小構成**: `.env` 設定後に `slack_tmux_bridge.py` を直接起動。トライアル用。
 2. **推奨構成**: `goslack.py` でマッピングを登録してから橋を起動し、複数チャネル/ペイン環境でも整合性を保ちます。
-3. **デーモン構成**: `launchd`（`run_slack_bridge.sh` 経由）で常駐させ、`goslack.py` で `active_sessions.json` を維持しながら自動的に再起動させます。
+3. **デーモン構成**: `launchd` で常駐させ、`goslack.py` で `active_sessions.json` を維持しながら自動的に再起動させます。
 
 ## ユーティリティ
 
@@ -235,4 +251,4 @@ python slack_tmux_bridge.py
 ```
 📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
 ```
-- `run_slack_bridge.sh`: `.env` を読み込み `slack_tmux_bridge.py` を起動（`launchd` 時に利用）。
+- `run_slack_bridge.sh`: 旧ラッパー（現在は未使用）。

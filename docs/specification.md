@@ -28,7 +28,7 @@
 | `slack_tmux_bridge.py` | Slackイベントを受け、tmuxに入力し、結果を監視/返信するメインブリッジ |
 | `goslack.py` | tmux ペインと Slack チャンネルの対応表を書き込む |
 | `send_enter.sh` | tmux に Enter を送る最小ヘルパ |
-| `run_slack_bridge.sh` | `.env` を読み込んでブリッジを起動するラッパ |
+| `run_slack_bridge.sh` | 旧ラッパー（現在は未使用） |
 | `active_sessions.json` | Slack チャンネルID → pane_id/ペイン/ディレクトリ/チャンネル名のマッピング |
 | `tmp/` | スナップショット保存、PID ファイルなど |
 
@@ -53,6 +53,7 @@
 | `SNAPSHOT_TTL_SEC` | `86400` | スナップショット保持 | 長期運用でのディスク肥大防止 |
 | `CHANNEL_IDLE_NOTIFY_SEC` | `1800` | アイドル通知間隔 | 無反応チャンネルへの定期通知 |
 | `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` | `1800` | アイドル通知抑制 | 通知スパム防止 |
+| `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---
 
@@ -240,7 +241,7 @@ python goslack.py rm 4
 ├── slack_tmux_bridge.py  # ブリッジ本体
 ├── goslack.py            # チャンネル→ペイン登録
 ├── send_enter.sh         # Enter送信ヘルパ
-├── run_slack_bridge.sh   # .env ローダ
+├── run_slack_bridge.sh   # 旧ラッパー（現在は未使用）
 ├── active_sessions.json  # チャンネル→pane_id/ペイン/ディレクトリ/チャンネル名対応表
 ├── tmp/                  # スナップショット/ PID
 └── docs/

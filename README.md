@@ -62,6 +62,7 @@ cp .env.sample .env
 - `SLACK_APP_TOKEN` – `xapp-…` token for Socket Mode.
 - `TARGET_CHANNEL_ID` – legacy setting (unused by current implementation).
 - `LOG_LEVEL` – controls Bolt/SDK logging (`INFO`, `DEBUG`).
+- `TMUX_BIN` – absolute path to the tmux binary. Required if `tmux` is not in PATH (common under launchd).
 - `OUTPUT_DIFF_MODE` – choose `replace` (current output) or `suffix` (print everything after the last occurrence of the initial screen).
 - `EVENT_HEALTH_*` – tune timeout, action (`log`, `exit`, `restart`), restart cooldown, notification delivery, and notification cooldown.
 - `PROMPT_CACHE_TTL_SEC` / `SNAPSHOT_TTL_SEC` – retention windows for cached prompts and snapshots; maintenance workers purge expired files.
@@ -121,7 +122,7 @@ chmod +x send_enter.sh
 
 ### 5. Optional macOS Launchd deployment
 
-Create `~/Library/LaunchAgents/com.slack_tmux_bridge.plist` containing:
+This repo includes a ready plist at `launchd/com.slack_tmux_bridge.plist`. Copy it to `~/Library/LaunchAgents` and adjust paths if needed:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -132,7 +133,10 @@ Create `~/Library/LaunchAgents/com.slack_tmux_bridge.plist` containing:
   <string>com.slack_tmux_bridge</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/WORKSPACE/slack_tmux_bridge/run_slack_bridge.sh</string>
+    <string>/usr/bin/env</string>
+    <string>TMUX_BIN=/usr/local/bin/tmux</string>
+    <string>python3</string>
+    <string>/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -146,11 +150,23 @@ Create `~/Library/LaunchAgents/com.slack_tmux_bridge.plist` containing:
 </plist>
 ```
 
-Adjust paths to your environment. Load/unload with:
+Adjust paths to your environment. Copy and load/unload with:
 
 ```bash
+cp launchd/com.slack_tmux_bridge.plist ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
 launchctl load ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
 launchctl unload ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
+```
+
+You can also use the helper script:
+
+```bash
+./launchd/launchd_ctl.sh install
+./launchd/launchd_ctl.sh start
+./launchd/launchd_ctl.sh stop
+./launchd/launchd_ctl.sh restart
+./launchd/launchd_ctl.sh status
+./launchd/launchd_ctl.sh log
 ```
 
 Monitor status via `launchctl list | grep slack_tmux_bridge`. Logs contain `LOG_LEVEL` output plus restart history.

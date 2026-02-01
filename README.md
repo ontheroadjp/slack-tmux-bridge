@@ -261,6 +261,26 @@ gemini() {
 }
 ```
 
+You can apply the same pattern to Codex:
+
+```bash
+codex() {
+  goslack
+  trap '
+    if [ -n "$TMUX" ]; then
+      pane_id=$(tmux display-message -p "#{pane_id}" 2>/dev/null)
+      if [ -n "$pane_id" ]; then
+        num=$(python goslack.py list | awk -v pid="$pane_id" "NR>1 && \\$4==pid {print \\$1; exit}")
+        if [ -n "$num" ]; then
+          python goslack.py rm "$num" --notify "codex exited, mapping removed."
+        fi
+      fi
+    fi
+  ' RETURN
+  command codex "$@"
+}
+```
+
 Example (`/sessions` output):
 
 ```

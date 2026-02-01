@@ -157,7 +157,13 @@ def get_target_pane(channel_id: str) -> str:
     try:
         data = _load_active_sessions()
         value = data.get(channel_id)
-        return _normalize_tmux_target(value)
+        if isinstance(value, dict):
+            pane_id = value.get("pane_id")
+            if not pane_id:
+                log(f"Missing pane_id for channel {channel_id}; re-register with goslack.py")
+                return None
+            return _resolve_tmux_target_from_pane_id(pane_id)
+        return None
     except Exception as e:
         log(f"Error reading active sessions: {e}")
         return None
@@ -180,6 +186,15 @@ def _normalize_tmux_target(value):
     if isinstance(value, dict):
         return value.get("pane")
     return value
+
+def _resolve_tmux_target_from_pane_id(pane_id: str):
+    try:
+        cmd = ["tmux", "display-message", "-p", "-t", pane_id, "#{session_name}:#{window_index}.#{pane_index}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        target = result.stdout.strip()
+        return target if target else None
+    except subprocess.CalledProcessError:
+        return None
 
 # =====================
 # Slack App
@@ -273,6 +288,7 @@ LAST_RESTART_TS = 0.0
 ACTIVE_MONITORS_BY_CHANNEL = {}
 ACTIVE_MONITORS_BY_THREAD = {}
 ACTIVE_MONITOR_LOCK = threading.Lock()
+PENDING_REBIND_BY_THREAD = {}
 
 def get_snapshot_path(thread_ts: str) -> str:
     return os.path.join(TMP_DIR, f"snapshot_{thread_ts}.txt")
@@ -400,10 +416,14 @@ def _dedupe_active_sessions():
 
     pane_map = {}
     for channel_id, value in sessions.items():
-        pane = _normalize_tmux_target(value)
-        if not pane:
+        pane_key = None
+        if isinstance(value, dict):
+            pane_key = value.get("pane_id") or value.get("pane")
+        else:
+            pane_key = value
+        if not pane_key:
             continue
-        pane_map.setdefault(pane, []).append((channel_id, value))
+        pane_map.setdefault(pane_key, []).append((channel_id, value))
 
     updated = False
     for pane, entries in pane_map.items():
@@ -504,7 +524,7 @@ def monitor_and_reply(thread_ts, channel_id, tmux_target, initial_content, promp
     last_clean = strip_ansi(capture_tmux(tmux_target, lines=True))
     
     stable_count = 0
-    max_wait_cycles = 60
+    max_wait_cycles = 180
     try:
         for _ in range(max_wait_cycles):
             time.sleep(1.0)
@@ -613,7 +633,7 @@ def monitor_and_reply(thread_ts, channel_id, tmux_target, initial_content, promp
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "⚠️ *タイムアウトしました（60秒経過）。*\nまだ処理中の可能性があります。監視を継続する場合は下のボタンを押してください。"
+                        "text": "⚠️ *タイムアウトしました（180秒経過）。*\nまだ処理中の可能性があります。監視を継続する場合は下のボタンを押してください。"
                     }
                 },
                 {
@@ -656,6 +676,49 @@ def _normalize_slash_command_text(text: str) -> str:
 def _is_command(text: str, command: str) -> bool:
     text = _normalize_slash_command_text(text)
     return re.match(rf"^{re.escape(command)}(\s|$)", text) is not None
+
+def _get_channel_name_from_slack(channel_id: str):
+    try:
+        resp = app.client.conversations_info(channel=channel_id)
+        return resp.get("channel", {}).get("name")
+    except Exception:
+        return None
+
+def _get_pane_current_path(pane_id: str):
+    try:
+        cmd = ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_current_path}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+def _handle_prompt_text(channel_id: str, thread_ts: str, tmux_target: str, text: str):
+    log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
+
+    # プロンプトをキャッシュに保存（ボタン実行時に使用するため）
+    PROMPT_CACHE[thread_ts] = text
+    PROMPT_CACHE_TS[thread_ts] = time.time()
+
+    # 「スラッシュコマンド」というメッセージを受け取った場合は、ボタンメニューを表示
+    if text == "スラッシュコマンド":
+        _handle_command_menu(channel_id, thread_ts)
+        return
+
+    # =====================
+    # Command filter (allowlist/denylist)
+    # =====================
+    allowed, reason = is_command_allowed(text)
+    if not allowed:
+        log(f"BLOCKED COMMAND: {text}")
+        _post_message(channel_id, reason, thread_ts=thread_ts)
+        return
+
+    # 数字だけの場合は即時実行
+    if text.isdigit():
+        _handle_numeric_message(channel_id, thread_ts, tmux_target, text)
+        return
+
+    _handle_text_message(channel_id, thread_ts, tmux_target, text)
 
 def _handle_bye_command(channel_id: str, thread_ts: str) -> bool:
     try:
@@ -859,7 +922,7 @@ def handle_message(event, logger):
         _handle_dir_command(channel_id, thread_ts)
         return
     if _is_command(text, "/now"):
-        tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
+        tmux_target = get_target_pane(channel_id)
         _handle_now_command(channel_id, thread_ts, tmux_target)
         return
     if _is_command(text, "/sessions"):
@@ -871,37 +934,62 @@ def handle_message(event, logger):
     # Active Session Check
     # =====================
     # Check if this channel has an active tmux session
-    tmux_target = _normalize_tmux_target(get_target_pane(channel_id))
+    tmux_target = get_target_pane(channel_id)
     if not tmux_target:
         # Ignore messages from unconfigured channels
         return
 
-    log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
+    # pane/name mismatch detection
+    entry = _load_active_sessions().get(channel_id)
+    if isinstance(entry, dict):
+        expected_pane = entry.get("pane")
+        pane_id = entry.get("pane_id")
+        expected_name = entry.get("name")
+        current_name = _get_channel_name_from_slack(channel_id)
+        mismatch = False
+        if expected_pane and expected_pane != tmux_target:
+            mismatch = True
+        if expected_name and current_name and expected_name != current_name:
+            mismatch = True
+        if pane_id and mismatch:
+            PENDING_REBIND_BY_THREAD[thread_ts] = {
+                "channel_id": channel_id,
+                "text": text,
+                "pane_id": pane_id,
+            }
+            _post_message(
+                channel_id,
+                "⚠️ 接続先が変わっている可能性があります。続行しますか？",
+                thread_ts=thread_ts,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*現在のペイン*: `{tmux_target}`\n*登録ペイン*: `{expected_pane}`"
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "OK"},
+                                "action_id": "confirm_rebind"
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "キャンセル（切断）"},
+                                "style": "danger",
+                                "action_id": "cancel_rebind"
+                            }
+                        ]
+                    }
+                ]
+            )
+            return
 
-    # プロンプトをキャッシュに保存（ボタン実行時に使用するため）
-    PROMPT_CACHE[event["ts"]] = text
-    PROMPT_CACHE_TS[event["ts"]] = time.time()
-
-    # 「スラッシュコマンド」というメッセージを受け取った場合は、ボタンメニューを表示
-    if text == "スラッシュコマンド":
-        _handle_command_menu(channel_id, thread_ts)
-        return
-
-    # =====================
-    # Command filter (allowlist/denylist)
-    # =====================
-    allowed, reason = is_command_allowed(text)
-    if not allowed:
-        log(f"BLOCKED COMMAND: {text}")
-        _post_message(channel_id, reason, thread_ts=thread_ts)
-        return
-
-    # 数字だけの場合は即時実行
-    if text.isdigit():
-        _handle_numeric_message(channel_id, thread_ts, tmux_target, text)
-        return
-
-    _handle_text_message(channel_id, thread_ts, tmux_target, text)
+    _handle_prompt_text(channel_id, thread_ts, tmux_target, text)
 
 # =====================
 # Slack: ▶︎ 実行（Enter） → 自動監視開始
@@ -1169,6 +1257,56 @@ def handle_show_gemini(ack, body):
         "```" + out[-3500:] + "```",
         thread_ts=thread_ts
     )
+
+# =====================
+# Slack: rebind confirmation
+# =====================
+@app.action("confirm_rebind")
+def handle_confirm_rebind(ack, body):
+    ack()
+    channel_id = body["channel"]["id"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
+    pending = PENDING_REBIND_BY_THREAD.pop(thread_ts, None)
+    if not pending:
+        _post_message(channel_id, "⚠️ 対象の再接続情報が見つかりません。", thread_ts=thread_ts)
+        return
+
+    pane_id = pending.get("pane_id")
+    text = pending.get("text", "")
+    tmux_target = _resolve_tmux_target_from_pane_id(pane_id)
+    if not tmux_target:
+        _post_message(channel_id, "⚠️ ペインが見つからないため実行を中止しました。", thread_ts=thread_ts)
+        return
+
+    sessions = _load_active_sessions()
+    entry = sessions.get(channel_id, {}) if isinstance(sessions.get(channel_id), dict) else {}
+    entry["pane_id"] = pane_id
+    entry["pane"] = tmux_target
+    entry["dir"] = _get_pane_current_path(pane_id) or entry.get("dir")
+    entry["name"] = _get_channel_name_from_slack(channel_id) or entry.get("name")
+    sessions[channel_id] = entry
+    _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+
+    _post_message(channel_id, "✅ 接続先を更新しました。実行します。", thread_ts=thread_ts)
+    _handle_prompt_text(channel_id, thread_ts, tmux_target, text)
+
+
+@app.action("cancel_rebind")
+def handle_cancel_rebind(ack, body):
+    ack()
+    channel_id = body["channel"]["id"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
+    pending = PENDING_REBIND_BY_THREAD.pop(thread_ts, None)
+
+    sessions = _load_active_sessions()
+    entry = sessions.get(channel_id)
+    channel_name = entry.get("name") if isinstance(entry, dict) else None
+    if channel_id in sessions:
+        del sessions[channel_id]
+        _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+
+    label = channel_name or channel_id
+    _post_message(channel_id, f"キャンセルをして {label} の接続を解除しました。", thread_ts=thread_ts)
 
 # =====================
 # Slack: /sessions -> show active sessions

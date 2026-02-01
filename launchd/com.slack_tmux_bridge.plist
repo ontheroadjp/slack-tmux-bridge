@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.slack_tmux_bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>TMUX_BIN=/usr/local/bin/tmux</string>
+    <string>python3</string>
+    <string>/Users/hideaki/dev/src/github.com/ontheroadjp/slack-tmux-bridge/slack_tmux_bridge.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/hideaki/Library/Logs/slack_tmux_bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/hideaki/Library/Logs/slack_tmux_bridge.log</string>
+</dict>
+</plist>

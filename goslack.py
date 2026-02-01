@@ -18,6 +18,7 @@ AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 # Load environment variables
 load_dotenv(DOTENV_PATH)
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
 
 def load_json(path):
     if not os.path.exists(path):
@@ -52,7 +53,7 @@ def get_tmux_pane_id():
             print("Error: This script must be run inside a tmux session.")
             sys.exit(1)
             
-        cmd = ["tmux", "display-message", "-p", "#{pane_id}"]
+        cmd = [TMUX_BIN, "display-message", "-p", "#{pane_id}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -66,7 +67,7 @@ def get_tmux_target():
         if not os.environ.get("TMUX"):
             print("Error: This script must be run inside a tmux session.")
             sys.exit(1)
-        cmd = ["tmux", "display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]
+        cmd = [TMUX_BIN, "display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -76,7 +77,7 @@ def get_tmux_target():
 
 def get_tmux_pane_id_from_target(tmux_target):
     try:
-        cmd = ["tmux", "display-message", "-p", "-t", tmux_target, "#{pane_id}"]
+        cmd = [TMUX_BIN, "display-message", "-p", "-t", tmux_target, "#{pane_id}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -85,7 +86,7 @@ def get_tmux_pane_id_from_target(tmux_target):
 
 def get_tmux_pane_cwd(tmux_target):
     try:
-        cmd = ["tmux", "display-message", "-p", "-t", tmux_target, "#{pane_current_path}"]
+        cmd = [TMUX_BIN, "display-message", "-p", "-t", tmux_target, "#{pane_current_path}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -165,13 +166,15 @@ def list_sessions():
     if not entries:
         print("(no active sessions)")
         return
-    lines = []
-    for i, entry in enumerate(entries, start=1):
+    def _format_session_line(idx, entry):
         name = entry["channel_name"] or "-"
         pane = entry["pane"] or "-"
         pane_id = entry.get("pane_id") or "-"
         dir_path = entry["dir"] or "-"
-        lines.append(f"{i}\t{name}\t{pane}\t{pane_id}\t{dir_path}")
+        return f"{idx}\t{name}\t{pane}\t{pane_id}\t{dir_path}"
+    lines = []
+    for i, entry in enumerate(entries, start=1):
+        lines.append(_format_session_line(i, entry))
     print("num\tchannel_name\tpane\tpane_id\tdir")
     print("\n".join(lines))
 

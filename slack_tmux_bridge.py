@@ -21,6 +21,10 @@ load_dotenv()
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
+TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
+
+def _tmux_cmd(*args):
+    return [TMUX_BIN, *args]
 
 # =====================
 # Paths
@@ -189,7 +193,7 @@ def _normalize_tmux_target(value):
 
 def _resolve_tmux_target_from_pane_id(pane_id: str):
     try:
-        cmd = ["tmux", "display-message", "-p", "-t", pane_id, "#{session_name}:#{window_index}.#{pane_index}"]
+        cmd = _tmux_cmd("display-message", "-p", "-t", pane_id, "#{session_name}:#{window_index}.#{pane_index}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         target = result.stdout.strip()
         return target if target else None
@@ -220,6 +224,7 @@ def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None
 def log_incoming_payload(body, next):
     global LAST_EVENT_TS
     LAST_EVENT_TS = time.time()
+    event_id = body.get("event_id")
     body_type = body.get("type")
     if body_type == "event_callback":
         event = body.get("event", {})
@@ -230,9 +235,9 @@ def log_incoming_payload(body, next):
         text_present = bool(event.get("text"))
         if channel:
             LAST_EVENT_TS_BY_CHANNEL[channel] = time.time()
-        log(f"EVENT IN: type={event_type} subtype={subtype} channel={channel} user={user} text={text_present}")
+        log(f"EVENT IN: id={event_id} type={event_type} subtype={subtype} channel={channel} user={user} text={text_present}")
     else:
-        log(f"PAYLOAD IN: type={body_type}")
+        log(f"PAYLOAD IN: id={event_id} type={body_type}")
     return next()
 
 # =====================
@@ -242,14 +247,14 @@ def pre_clear_tmux(tmux_target: str):
     """実行前に画面と履歴をクリーンにする (tmuxの機能のみを使用)"""
     log(f"PRE-EXEC CLEAR: Clearing tmux history and screen (C-l) on {tmux_target}")
     # 1. 履歴をクリア
-    subprocess.run(["tmux", "clear-history", "-t", tmux_target])
+    subprocess.run(_tmux_cmd("clear-history", "-t", tmux_target))
     # 2. 画面をクリア (Ctrl+L)
-    subprocess.run(["tmux", "send-keys", "-t", tmux_target, "C-l"])
+    subprocess.run(_tmux_cmd("send-keys", "-t", tmux_target, "C-l"))
     # 反映待ち
     time.sleep(0.3)
 
 def send_text_to_tmux(tmux_target: str, text: str, thread_ts: str = None, channel_id: str = None):
-    cmd = ["tmux", "send-keys", "-t", tmux_target, text]
+    cmd = _tmux_cmd("send-keys", "-t", tmux_target, text)
     log("EXEC TEXT: " + " ".join(cmd))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -271,7 +276,7 @@ def send_enter(tmux_target: str, thread_ts: str = None, channel_id: str = None):
 
 def capture_tmux(tmux_target: str, lines=None):
     args = ["-p", "-S", "-1000"] if lines else ["-p"]
-    cmd = ["tmux", "capture-pane", "-t", tmux_target] + args
+    cmd = _tmux_cmd("capture-pane", "-t", tmux_target) + args
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.stdout or ""
 
@@ -345,6 +350,35 @@ def _load_active_sessions():
         log(f"Error reading active sessions: {e}")
         return {}
 
+def _get_sessions():
+    return _load_active_sessions()
+
+def _save_sessions(sessions):
+    _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+
+def _update_session_entry(channel_id, pane_id=None, pane=None, dir_path=None, name=None, sessions=None):
+    if sessions is None:
+        sessions = _get_sessions()
+    entry = sessions.get(channel_id)
+    if not isinstance(entry, dict):
+        entry = {}
+    if pane_id is not None:
+        entry["pane_id"] = pane_id
+    if pane is not None:
+        entry["pane"] = pane
+    if dir_path is not None:
+        entry["dir"] = dir_path
+    if name is not None:
+        entry["name"] = name
+    sessions[channel_id] = entry
+    return sessions
+
+def _delete_session_entry(channel_id, sessions=None):
+    if sessions is None:
+        sessions = _get_sessions()
+    entry = sessions.pop(channel_id, None)
+    return sessions, entry
+
 def _format_age(seconds: float) -> str:
     if seconds < 0:
         return "0s"
@@ -355,7 +389,7 @@ def _format_age(seconds: float) -> str:
     return f"{int(seconds // 3600)}h"
 
 def _build_sessions_output():
-    sessions = _load_active_sessions()
+    sessions = _get_sessions()
     if not sessions:
         return "(no active sessions)"
 
@@ -410,7 +444,7 @@ def _select_primary_channel(entries):
     return max(entries, key=_score)
 
 def _dedupe_active_sessions():
-    sessions = _load_active_sessions()
+    sessions = _get_sessions()
     if not sessions:
         return
 
@@ -444,7 +478,7 @@ def _dedupe_active_sessions():
             )
 
     if updated:
-        _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+        _save_sessions(sessions)
 
 def _maintenance_worker():
     while True:
@@ -686,11 +720,17 @@ def _get_channel_name_from_slack(channel_id: str):
 
 def _get_pane_current_path(pane_id: str):
     try:
-        cmd = ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_current_path}"]
+        cmd = _tmux_cmd("display-message", "-p", "-t", pane_id, "#{pane_current_path}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError:
         return None
+
+def _get_tmux_target_or_notify(channel_id: str, thread_ts: str = None, message: str = "⚠️ Error: No active tmux session.") -> str:
+    tmux_target = get_target_pane(channel_id)
+    if not tmux_target:
+        _post_message(channel_id, message, thread_ts=thread_ts)
+    return tmux_target
 
 def _handle_prompt_text(channel_id: str, thread_ts: str, tmux_target: str, text: str):
     log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
@@ -720,30 +760,95 @@ def _handle_prompt_text(channel_id: str, thread_ts: str, tmux_target: str, text:
 
     _handle_text_message(channel_id, thread_ts, tmux_target, text)
 
+def _dispatch_command(text: str, channel_id: str, thread_ts: str) -> bool:
+    if _is_command(text, "/bye"):
+        return _handle_bye_command(channel_id, thread_ts)
+    if _is_command(text, "/dir"):
+        _handle_dir_command(channel_id, thread_ts)
+        return True
+    if _is_command(text, "/now"):
+        tmux_target = _get_tmux_target_or_notify(channel_id, thread_ts=thread_ts)
+        _handle_now_command(channel_id, thread_ts, tmux_target)
+        return True
+    if _is_command(text, "/sessions"):
+        output = _build_sessions_output()
+        _post_message(channel_id, output, thread_ts=thread_ts)
+        return True
+    return False
+
+def _handle_rebind_guard(channel_id: str, thread_ts: str, text: str, tmux_target: str) -> bool:
+    sessions = _get_sessions()
+    entry = sessions.get(channel_id)
+    if not isinstance(entry, dict):
+        return False
+    expected_pane = entry.get("pane")
+    pane_id = entry.get("pane_id")
+    expected_name = entry.get("name")
+    current_name = _get_channel_name_from_slack(channel_id)
+    mismatch = False
+    if expected_pane and expected_pane != tmux_target:
+        mismatch = True
+    if expected_name and current_name and expected_name != current_name:
+        mismatch = True
+    if pane_id and mismatch:
+        PENDING_REBIND_BY_THREAD[thread_ts] = {
+            "channel_id": channel_id,
+            "text": text,
+            "pane_id": pane_id,
+        }
+        _post_message(
+            channel_id,
+            "⚠️ 接続先が変わっている可能性があります。続行しますか？",
+            thread_ts=thread_ts,
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*現在のペイン*: `{tmux_target}`\n*登録ペイン*: `{expected_pane}`"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "OK"},
+                            "action_id": "confirm_rebind"
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "キャンセル（切断）"},
+                            "style": "danger",
+                            "action_id": "cancel_rebind"
+                        }
+                    ]
+                }
+            ]
+        )
+        return True
+    return False
+
 def _handle_bye_command(channel_id: str, thread_ts: str) -> bool:
     try:
-        if os.path.exists(ACTIVE_SESSIONS_FILE):
-            with open(ACTIVE_SESSIONS_FILE, "r", encoding="utf-8") as f:
-                sessions = json.load(f)
-
-            if channel_id in sessions:
-                del sessions[channel_id]
-                _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
-
-                log(f"Disconnected channel {channel_id}")
-                _post_message(
-                    channel_id,
-                    "🔌 このチャンネルの接続を解除しました。",
-                    thread_ts=thread_ts
-                )
-                return True
-
+        sessions = _get_sessions()
+        sessions, removed = _delete_session_entry(channel_id, sessions)
+        if removed:
+            _save_sessions(sessions)
+            log(f"Disconnected channel {channel_id}")
             _post_message(
                 channel_id,
-                "⚠️ このチャンネルは既に接続されていません。",
+                "🔌 このチャンネルの接続を解除しました。",
                 thread_ts=thread_ts
             )
             return True
+
+        _post_message(
+            channel_id,
+            "⚠️ このチャンネルは既に接続されていません。",
+            thread_ts=thread_ts
+        )
+        return True
     except Exception as e:
         log(f"Error disconnecting: {e}")
         _post_message(
@@ -772,7 +877,6 @@ def _handle_dir_command(channel_id: str, thread_ts: str) -> bool:
 
 def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bool:
     if not tmux_target:
-        _post_message(channel_id, "⚠️ Error: No active tmux session.", thread_ts=thread_ts)
         return True
 
     with ACTIVE_MONITOR_LOCK:
@@ -783,6 +887,15 @@ def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bo
                 thread_ts=thread_ts
             )
 
+    _start_monitoring_from_snapshot(
+        channel_id,
+        thread_ts,
+        tmux_target,
+        "🔄 現在の状態を取得しています..."
+    )
+    return True
+
+def _start_monitoring_from_snapshot(channel_id: str, thread_ts: str, tmux_target: str, message: str):
     initial_content, prompt = load_snapshot(thread_ts)
     if not initial_content:
         log(f"Snapshot not found for {thread_ts}, using current screen as initial.")
@@ -791,7 +904,7 @@ def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bo
 
     _post_message(
         channel_id,
-        "🔄 現在の状態を取得しています...",
+        message,
         thread_ts=thread_ts
     )
 
@@ -800,7 +913,6 @@ def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bo
         args=(thread_ts, channel_id, tmux_target, initial_content, prompt),
         daemon=True
     ).start()
-    return True
 
 def _handle_command_menu(channel_id: str, thread_ts: str) -> bool:
     _post_message(
@@ -907,28 +1019,14 @@ def handle_message(event, logger):
 
     thread_ts = _get_thread_ts_from_message(event)
 
+    if _dispatch_command(text, channel_id, thread_ts):
+        return
+
     # =====================
     # Command: /bye (Connection cleanup)
     # Works even if not connected (to clean up state)
     # =====================
-    if _is_command(text, "/bye"):
-        if _handle_bye_command(channel_id, thread_ts):
-            return
-    
-    # =====================
-    # Command: /dir (Show connected directory)
-    # =====================
-    if _is_command(text, "/dir"):
-        _handle_dir_command(channel_id, thread_ts)
-        return
-    if _is_command(text, "/now"):
-        tmux_target = get_target_pane(channel_id)
-        _handle_now_command(channel_id, thread_ts, tmux_target)
-        return
-    if _is_command(text, "/sessions"):
-        output = _build_sessions_output()
-        _post_message(channel_id, output, thread_ts=thread_ts)
-        return
+    # (handled by _dispatch_command)
 
     # =====================
     # Active Session Check
@@ -940,55 +1038,8 @@ def handle_message(event, logger):
         return
 
     # pane/name mismatch detection
-    entry = _load_active_sessions().get(channel_id)
-    if isinstance(entry, dict):
-        expected_pane = entry.get("pane")
-        pane_id = entry.get("pane_id")
-        expected_name = entry.get("name")
-        current_name = _get_channel_name_from_slack(channel_id)
-        mismatch = False
-        if expected_pane and expected_pane != tmux_target:
-            mismatch = True
-        if expected_name and current_name and expected_name != current_name:
-            mismatch = True
-        if pane_id and mismatch:
-            PENDING_REBIND_BY_THREAD[thread_ts] = {
-                "channel_id": channel_id,
-                "text": text,
-                "pane_id": pane_id,
-            }
-            _post_message(
-                channel_id,
-                "⚠️ 接続先が変わっている可能性があります。続行しますか？",
-                thread_ts=thread_ts,
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*現在のペイン*: `{tmux_target}`\n*登録ペイン*: `{expected_pane}`"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "OK"},
-                                "action_id": "confirm_rebind"
-                            },
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "キャンセル（切断）"},
-                                "style": "danger",
-                                "action_id": "cancel_rebind"
-                            }
-                        ]
-                    }
-                ]
-            )
-            return
-
+    if _handle_rebind_guard(channel_id, thread_ts, text, tmux_target):
+        return
     _handle_prompt_text(channel_id, thread_ts, tmux_target, text)
 
 # =====================
@@ -1000,9 +1051,11 @@ def handle_send_enter(ack, body):
     log("BUTTON CLICKED: send_enter")
     
     channel_id = body["channel"]["id"]
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _get_tmux_target_or_notify(
+        channel_id,
+        message="⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal."
+    )
     if not tmux_target:
-        _post_message(channel_id, "⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal.")
         return
 
     # スレッドの親TSを取得
@@ -1020,10 +1073,6 @@ def handle_send_enter(ack, body):
 
     # プリクリアを実行
     pre_clear_tmux(tmux_target)
-
-    # 文字列を再送してから Enter を送信する
-    if prompt:
-        send_text_to_tmux(tmux_target, prompt, thread_ts=thread_ts, channel_id=channel_id)
 
     # 現在の画面状態を保存 (クリーンな状態)
     initial_content = capture_tmux(tmux_target, lines=True)
@@ -1047,31 +1096,17 @@ def handle_continue_monitor(ack, body):
     log("BUTTON CLICKED: continue_monitor")
     
     channel_id = body["channel"]["id"]
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _get_tmux_target_or_notify(channel_id)
     if not tmux_target:
-        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
     thread_ts = _get_thread_ts_from_message(body["message"])
-    
-    initial_content, prompt = load_snapshot(thread_ts)
-    if not initial_content:
-        # スナップショットが見つからない場合は現在の画面を基準にする
-        log(f"Snapshot not found for {thread_ts}, using current screen as initial.")
-        initial_content = capture_tmux(tmux_target, lines=True)
-        prompt = ""
-
-    _post_message(
+    _start_monitoring_from_snapshot(
         channel_id,
-        "🔄 監視を再開しました...",
-        thread_ts=thread_ts
+        thread_ts,
+        tmux_target,
+        "🔄 監視を再開しました..."
     )
-
-    threading.Thread(
-        target=monitor_and_reply,
-        args=(thread_ts, channel_id, tmux_target, initial_content, prompt),
-        daemon=True
-    ).start()
 
 # =====================
 # Slack: ⚡ /コマンド → コマンド選択肢を表示
@@ -1173,9 +1208,8 @@ def handle_slash_command(ack, body):
     ack()
     
     channel_id = body["channel"]["id"]
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _get_tmux_target_or_notify(channel_id)
     if not tmux_target:
-        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
     # action_id が何であれ、value にコマンドが入っているのでそれを使う
@@ -1191,7 +1225,7 @@ def handle_slash_command(ack, body):
     )
 
     # 1. プリクリア (既存の入力も C-u の代わりに C-l で実質的に消えるか、C-uを併用)
-    subprocess.run(["tmux", "send-keys", "-t", tmux_target, "C-u"]) # 念のため既存行クリア
+    subprocess.run(_tmux_cmd("send-keys", "-t", tmux_target, "C-u")) # 念のため既存行クリア
     pre_clear_tmux(tmux_target)
     
     # 2. コマンド入力
@@ -1216,14 +1250,14 @@ def handle_delete_prompt(ack, body):
     log("BUTTON CLICKED: delete_prompt")
     
     channel_id = body["channel"]["id"]
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _get_tmux_target_or_notify(channel_id)
     if not tmux_target:
         return # 静かに無視、あるいはエラー表示
 
     thread_ts = _get_thread_ts_from_message(body["message"])
 
     # Ctrl+u を送信して行をクリア
-    cmd = ["tmux", "send-keys", "-t", tmux_target, "C-u"]
+    cmd = _tmux_cmd("send-keys", "-t", tmux_target, "C-u")
     subprocess.run(cmd)
     
     _post_message(
@@ -1241,9 +1275,8 @@ def handle_show_gemini(ack, body):
     log("BUTTON CLICKED: show_gemini")
     
     channel_id = body["channel"]["id"]
-    tmux_target = get_target_pane(channel_id)
+    tmux_target = _get_tmux_target_or_notify(channel_id)
     if not tmux_target:
-        _post_message(channel_id, "⚠️ Error: No active tmux session.")
         return
 
     thread_ts = _get_thread_ts_from_message(body["message"])
@@ -1278,14 +1311,16 @@ def handle_confirm_rebind(ack, body):
         _post_message(channel_id, "⚠️ ペインが見つからないため実行を中止しました。", thread_ts=thread_ts)
         return
 
-    sessions = _load_active_sessions()
-    entry = sessions.get(channel_id, {}) if isinstance(sessions.get(channel_id), dict) else {}
-    entry["pane_id"] = pane_id
-    entry["pane"] = tmux_target
-    entry["dir"] = _get_pane_current_path(pane_id) or entry.get("dir")
-    entry["name"] = _get_channel_name_from_slack(channel_id) or entry.get("name")
-    sessions[channel_id] = entry
-    _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+    sessions = _get_sessions()
+    sessions = _update_session_entry(
+        channel_id,
+        pane_id=pane_id,
+        pane=tmux_target,
+        dir_path=_get_pane_current_path(pane_id),
+        name=_get_channel_name_from_slack(channel_id),
+        sessions=sessions,
+    )
+    _save_sessions(sessions)
 
     _post_message(channel_id, "✅ 接続先を更新しました。実行します。", thread_ts=thread_ts)
     _handle_prompt_text(channel_id, thread_ts, tmux_target, text)
@@ -1298,12 +1333,12 @@ def handle_cancel_rebind(ack, body):
     thread_ts = _get_thread_ts_from_message(body["message"])
     pending = PENDING_REBIND_BY_THREAD.pop(thread_ts, None)
 
-    sessions = _load_active_sessions()
+    sessions = _get_sessions()
     entry = sessions.get(channel_id)
     channel_name = entry.get("name") if isinstance(entry, dict) else None
     if channel_id in sessions:
-        del sessions[channel_id]
-        _atomic_write_json(ACTIVE_SESSIONS_FILE, sessions)
+        sessions, _ = _delete_session_entry(channel_id, sessions)
+        _save_sessions(sessions)
 
     label = channel_name or channel_id
     _post_message(channel_id, f"キャンセルをして {label} の接続を解除しました。", thread_ts=thread_ts)

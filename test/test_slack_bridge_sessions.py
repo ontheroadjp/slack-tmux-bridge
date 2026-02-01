@@ -252,8 +252,9 @@ def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
 def test_now_command_errors_without_session(monkeypatch):
     sent = []
     monkeypatch.setattr(stb, "_post_message", lambda ch, text, thread_ts=None, blocks=None: sent.append(text))
+    monkeypatch.setattr(stb, "get_target_pane", lambda *_: None)
 
-    stb._handle_now_command("C1", "thread1", None)
+    stb._dispatch_command("/now", "C1", "thread1")
 
     assert sent
     assert "No active tmux session" in sent[0]

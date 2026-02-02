@@ -7,7 +7,7 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Slack integration**: Bolt Socket Mode receives channel messages, posts replies, and exposes slash commands.
 - **Pre-clear and clean output**: Runs `tmux clear-history` + `Ctrl+L` before each command, then extracts everything after the echoed prompt (`> [prompt]`).
 - **Input ergonomics**: Numeric messages auto-run, text messages stay pending until you press “Execute (Enter)”, and selected slash commands send prebuilt inputs.
-- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results directly to the Slack thread.
+- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread.
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless explicitly escaped.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
 - **Health monitoring**: Workers prune prompt cache and detect stalled event streams, with optional warnings or self-restart actions.

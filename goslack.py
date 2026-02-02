@@ -259,6 +259,11 @@ def _resolve_channel(client, dir_name, active_sessions):
             return channel
     return None
 
+def _resolve_channel_by_name(client, channel_name):
+    if not channel_name:
+        return None
+    return _find_channel_by_name(client, channel_name)
+
 def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd):
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
     duplicates = [
@@ -291,6 +296,11 @@ def main():
         help="Post a Slack message to the removed channel",
     )
     parser.add_argument("--add", metavar="PANE", help="Register a target tmux pane (e.g., 1:2.0)")
+    parser.add_argument(
+        "--channel",
+        metavar="NAME",
+        help="Override channel name (optional). When provided, no fallback is used.",
+    )
 
     args = parser.parse_args()
 
@@ -310,16 +320,23 @@ def main():
         cwd = os.getcwd()
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
 
-    # 2. Resolve channel ID by current directory name
+    # 2. Resolve channel ID by current directory name (or explicit override)
     client = _get_slack_client()
     dir_name = os.path.basename(cwd)
-    channel = _resolve_channel(client, dir_name, active_sessions)
+    if args.channel:
+        channel = _resolve_channel_by_name(client, args.channel)
+    else:
+        channel = _resolve_channel(client, dir_name, active_sessions)
 
     if not channel:
-        print("❌ Error: No channel matched this directory name.")
-        print(f"Current Directory: {cwd}")
-        print(f"Directory Name:    {dir_name}")
-        print("Tried fallbacks:   ai-studio-01, ai-studio-02, ai-studio-03")
+        if args.channel:
+            print("❌ Error: No channel matched the provided name.")
+            print(f"Requested Name:   {args.channel}")
+        else:
+            print("❌ Error: No channel matched this directory name.")
+            print(f"Current Directory: {cwd}")
+            print(f"Directory Name:    {dir_name}")
+            print("Tried fallbacks:   ai-studio-01, ai-studio-02, ai-studio-03")
         sys.exit(1)
     
     target_channel = channel.get("id")

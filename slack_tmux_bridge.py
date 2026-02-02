@@ -599,7 +599,7 @@ def _require_thread_ts(message, channel_id: str):
     return None
 
 def _build_reply_instruction(channel_id: str, thread_ts: str) -> str:
-    return f"({channel_id}チャンネルの{thread_ts}スレッドに実行結果を返信してください。)"
+    return f"({channel_id}チャンネルの{thread_ts}スレッドに実行結果を返信してください。許可を求める場合も同スレッドに投稿してください。)"
 
 def _with_reply_instruction(text: str, channel_id: str, thread_ts: str) -> str:
     instruction = _build_reply_instruction(channel_id, thread_ts)

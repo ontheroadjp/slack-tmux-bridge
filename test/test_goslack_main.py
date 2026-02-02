@@ -107,6 +107,25 @@ def test_main_add_registers_target_pane(tmp_path, monkeypatch):
     assert sessions["C1"]["pane_id"] == "%9"
 
 
+def test_main_add_registers_target_pane_with_channel_override(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+
+    channels = [{"id": "C9", "name": "override-channel"}]
+    monkeypatch.setattr(goslack, "_get_slack_client", lambda: FakeClient(channels))
+    monkeypatch.setattr(goslack, "get_tmux_pane_cwd", lambda _: "/tmp/workdir")
+    monkeypatch.setattr(goslack, "get_tmux_pane_id_from_target", lambda _: "%9")
+    monkeypatch.setattr(goslack, "send_slack_message", lambda *_: None)
+    monkeypatch.setattr(sys, "argv", ["goslack.py", "--add", "1:2.0", "--channel", "override-channel"])
+
+    goslack.main()
+
+    sessions = goslack.load_json(str(sessions_path))
+    assert sessions["C9"]["pane"] == "1:2.0"
+    assert sessions["C9"]["pane_id"] == "%9"
+    assert sessions["C9"]["name"] == "override-channel"
+
+
 def test_find_channel_by_name_handles_api_error(monkeypatch, capsys):
     class BadClient:
         def conversations_list(self, *args, **kwargs):

@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 # =====================
 load_dotenv()
 
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
 TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
 
 def _tmux_cmd(*args):
@@ -49,6 +49,13 @@ EVENT_HEALTH_NOTIFY_COOLDOWN_SEC = int(os.environ.get("EVENT_HEALTH_NOTIFY_COOLD
 PROMPT_CACHE_TTL_SEC = int(os.environ.get("PROMPT_CACHE_TTL_SEC", "3600"))
 CHANNEL_IDLE_NOTIFY_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_SEC", "1800"))
 CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC", "1800"))
+# Permission prompt watch (best-effort capture for approval requests)
+PERMISSION_WATCH_SEC = int(os.environ.get("PERMISSION_WATCH_SEC", "120"))
+PERMISSION_WATCH_INTERVAL_SEC = float(os.environ.get("PERMISSION_WATCH_INTERVAL_SEC", "2"))
+PERMISSION_WATCH_PATTERN = os.environ.get(
+    "PERMISSION_WATCH_PATTERN",
+    r"(Allow once|Allow always|Approve|Permission|許可|承認)",
+)
 
 # =====================
 # logging & utility
@@ -69,6 +76,18 @@ def configure_logging():
     logging.getLogger("slack_bolt").setLevel(level)
     logging.getLogger("slack_sdk").setLevel(level)
     logging.getLogger("slack_sdk.socket_mode").setLevel(level)
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        log(f"Missing required environment variable: {name}")
+        sys.exit(1)
+    return value
+
+def ensure_required_tokens():
+    global SLACK_BOT_TOKEN, SLACK_APP_TOKEN
+    SLACK_BOT_TOKEN = _require_env("SLACK_BOT_TOKEN")
+    SLACK_APP_TOKEN = _require_env("SLACK_APP_TOKEN")
 
 def ensure_single_instance():
     # Guard against manual double-start even if PID file is missing.
@@ -171,6 +190,14 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
+
+def _compile_permission_pattern(value: str):
+    try:
+        return re.compile(value)
+    except re.error:
+        return re.compile(r"(Allow once|Allow always|Approve|Permission|許可|承認)")
+
+PERMISSION_WATCH_RE = _compile_permission_pattern(PERMISSION_WATCH_PATTERN)
 
 def get_target_pane(channel_id: str) -> str:
     """チャンネルIDに対応する tmux target を取得する。未接続なら None"""
@@ -313,6 +340,7 @@ def capture_tmux(tmux_target: str, lines=None):
 # =====================
 PROMPT_CACHE = {}  # thread_ts -> last_prompt
 PROMPT_CACHE_TS = {}  # thread_ts -> last_seen_epoch
+PERMISSION_ALERTED = set()
 LAST_EVENT_TS = time.time()
 LAST_EVENT_TS_BY_CHANNEL = {}
 LAST_HEALTH_NOTIFY_TS_BY_CHANNEL = {}
@@ -384,6 +412,53 @@ def _format_age(seconds: float) -> str:
         return f"{int(seconds // 60)}m"
     return f"{int(seconds // 3600)}h"
 
+def _permission_prompt_detected(text: str) -> bool:
+    if not text:
+        return False
+    return PERMISSION_WATCH_RE.search(text) is not None
+
+def _post_permission_prompt(channel_id: str, thread_ts: str, content: str):
+    excerpt = content.strip()
+    if not excerpt:
+        excerpt = "(no output)"
+    max_len = 3000
+    if len(excerpt) > max_len:
+        excerpt = excerpt[-max_len:]
+    _post_message(
+        channel_id,
+        "⚠️ 承認待ちの可能性があります:\n```\n" + excerpt + "\n```",
+        thread_ts=thread_ts,
+    )
+
+def _watch_permission_prompt(thread_ts: str, channel_id: str, tmux_target: str):
+    if PERMISSION_WATCH_SEC <= 0:
+        return
+    if not thread_ts or not channel_id or not tmux_target:
+        return
+    if thread_ts in PERMISSION_ALERTED:
+        return
+
+    deadline = time.time() + PERMISSION_WATCH_SEC
+    while time.time() < deadline:
+        raw_content = capture_tmux(tmux_target, lines=True)
+        current_clean = strip_ansi(raw_content)
+        if _permission_prompt_detected(current_clean):
+            if thread_ts not in PERMISSION_ALERTED:
+                PERMISSION_ALERTED.add(thread_ts)
+                _post_permission_prompt(channel_id, thread_ts, current_clean)
+            break
+        time.sleep(PERMISSION_WATCH_INTERVAL_SEC)
+
+def _start_permission_watch(thread_ts: str, channel_id: str, tmux_target: str):
+    if PERMISSION_WATCH_SEC <= 0:
+        return
+    watcher = threading.Thread(
+        target=_watch_permission_prompt,
+        args=(thread_ts, channel_id, tmux_target),
+        daemon=True,
+    )
+    watcher.start()
+
 def _build_sessions_output():
     sessions = _get_sessions()
     if not sessions:
@@ -405,6 +480,8 @@ def _cleanup_prompt_cache(thread_ts: str):
         del PROMPT_CACHE[thread_ts]
     if thread_ts in PROMPT_CACHE_TS:
         del PROMPT_CACHE_TS[thread_ts]
+    if thread_ts in PERMISSION_ALERTED:
+        PERMISSION_ALERTED.discard(thread_ts)
 
 def _select_primary_channel(entries):
     def _score(entry):
@@ -840,6 +917,7 @@ def _handle_numeric_message(channel_id: str, thread_ts: str, tmux_target: str, t
 
     # ④ Enter送信
     send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
+    _start_permission_watch(thread_ts, channel_id, tmux_target)
 
 def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
     # ① 文字だけ tmux に送る
@@ -969,6 +1047,7 @@ def handle_send_enter(ack, body):
 
     # Enterを送る
     send_enter(tmux_target, channel_id=channel_id)
+    _start_permission_watch(thread_ts, channel_id, tmux_target)
 
 # =====================
 # =====================
@@ -1111,6 +1190,7 @@ def handle_slash_command(ack, body):
     
     # 3. Enter
     send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
+    _start_permission_watch(thread_ts, channel_id, tmux_target)
 
 # =====================
 # Slack: 🗑️ プロンプト削除
@@ -1226,6 +1306,7 @@ def post_startup_message():
 if __name__ == "__main__":
     configure_logging()
     log("Slack → tmux bridge (Multi-channel) started")
+    ensure_required_tokens()
     # 初期化時に tmp ディレクトリ作成
     if not os.path.exists(TMP_DIR):
         os.makedirs(TMP_DIR)

@@ -61,6 +61,12 @@ def test_capture_sends_on_permission_prompt(monkeypatch):
     assert "Allow once" in messages[0] or "start" in messages[0]
 
 
+def test_permission_prompt_detected():
+    assert stb._permission_prompt_detected("Allow once")
+    assert stb._permission_prompt_detected("許可")
+    assert not stb._permission_prompt_detected("no prompt here")
+
+
 def test_capture_extracts_prompt_block(monkeypatch):
     monkeypatch.setattr(stb, "time", time)
     monkeypatch.setattr(stb.time, "sleep", lambda _: None)

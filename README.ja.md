@@ -8,7 +8,8 @@
 - **返信の委譲**: 実行時に `channel_id` と `thread_ts` を含む返信指示を付与し、AI エージェントがスレッドへ直接返信します（許可を求める場合も同スレッド）。
 - **事前クリアと出力整形**: 各操作前に `tmux clear-history` + `Ctrl+L` を実行し、実行プロンプト (`> [prompt]`) 以降だけを抽出します。
 - **入力エルゴノミクス**: 数字メッセージは自動実行、テキストは「実行」ボタンで Enter、スラッシュコマンドはメニューで送信します。
-- **コマンドフィルタ**: allowlist + denylist ルールと、デフォルトで `rm` をブロックする仕組み。
+- **コマンドフィルタ**: allowlist + denylist ルールと、デフォルトで `rm` をブロックする仕組み（`\rm` は許可）。
+- **承認要求の検知**: Enter 送信後に tmux 出力を監視し、承認要求の可能性があればスレッドに抜粋を投稿します。
 - **単一起動ガード**: PID ファイルで Socket Mode の二重接続を防ぎます。
 - **ヘルス監視**: キャッシュを定期クリーンし、イベント停止をログ・通知・再起動で検出。
 - **セッション可視化**: `/sessions` で接続中のチャンネル名とディレクトリを一覧表示できます。
@@ -67,11 +68,12 @@ cp .env.sample .env
 - `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC`: 通知間のクールダウン（秒）
 - `PROMPT_CACHE_TTL_SEC`: プロンプトキャッシュの保持時間
 - `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC`: アイドル通知の間隔とクールダウン（チャンネル単位）
+- `PERMISSION_WATCH_SEC` / `PERMISSION_WATCH_INTERVAL_SEC` / `PERMISSION_WATCH_PATTERN`: 承認要求の監視時間・間隔・検知パターン
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST`: カンマ区切りのマッチパターン（`all` で全許可/拒否）
 
 コマンドフィルタの注意点:
 
-- denylist が最優先。デフォルトで `/\brm\b/`（単独の `rm`）をブロックします。
+- denylist が最優先。デフォルトで `/(?<!\\)\brm\b/`（`\rm` を除いた `rm`）をブロックします。
 - allowlist は `all` 以外では一致しないとブロックされる。
 - `/…/` で囲まれたパターンは正規表現、それ以外は部分一致です。
 

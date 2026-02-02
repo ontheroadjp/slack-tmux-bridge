@@ -8,7 +8,8 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Pre-clear and clean output**: Runs `tmux clear-history` + `Ctrl+L` before each command, then extracts everything after the echoed prompt (`> [prompt]`).
 - **Input ergonomics**: Numeric messages auto-run, text messages stay pending until you press “Execute (Enter)”, and selected slash commands send prebuilt inputs.
 - **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread.
-- **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless explicitly escaped.
+- **Permission prompt watch**: After sending Enter, the bridge watches tmux output and posts a snippet to the thread if an approval prompt appears.
+- **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless escaped as `\rm`.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
 - **Health monitoring**: Workers prune prompt cache and detect stalled event streams, with optional warnings or self-restart actions.
 - **Session visibility**: `/sessions` command lists connected channel names and directories.
@@ -67,11 +68,12 @@ cp .env.sample .env
 - `EVENT_HEALTH_*` – tune timeout, action (`log`, `exit`, `restart`), restart cooldown, notification delivery, and notification cooldown.
 - `PROMPT_CACHE_TTL_SEC` – retention window for cached prompts; maintenance workers purge expired entries.
 - `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` – idle notification interval and cooldown (per channel).
-- `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks standalone `rm`.
+- `PERMISSION_WATCH_SEC` / `PERMISSION_WATCH_INTERVAL_SEC` / `PERMISSION_WATCH_PATTERN` – after sending Enter, watch tmux output for approval prompts and post a snippet to the thread.
+- `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:
 
-- Denylist is evaluated first and includes the default `/\brm\b/` pattern unless you override it.
+- Denylist is evaluated first and includes the default `/(?<!\\)\brm\b/` pattern unless you override it.
 - Allowlist must match unless you set it to `all`.
 - Patterns surrounded by `/…/` are treated as regex; otherwise, they match substrings.
 
@@ -200,8 +202,6 @@ Edit `.env` with your Slack tokens and optional tuning values documented above.
 source venv/bin/activate
 python slack_tmux_bridge.py
 ```
-
-Default target is `0:0.0`. Pass `1:2.0` to target a different session/window/pane.
 
 - Set `LOG_LEVEL=DEBUG` to capture Bolt/Socket Mode state and health logs.
 

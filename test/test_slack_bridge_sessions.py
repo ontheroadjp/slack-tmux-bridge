@@ -15,14 +15,7 @@ def test_sessions_output_includes_channel_name(tmp_path, monkeypatch):
         "C1": {"pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"},
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- chan-a → /tmp/a" in out
 
 
@@ -34,14 +27,7 @@ def test_sessions_output_includes_age(tmp_path, monkeypatch):
         "C1": {"pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"},
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- chan-a → /tmp/a" in out
 
 
@@ -228,7 +214,7 @@ def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
 
     class DummyThread:
         def __init__(self, target=None, args=(), daemon=None):
-            assert target == stb.monitor_and_reply
+            assert target == stb._capture_and_reply_once
             self.args = args
             self.daemon = daemon
 
@@ -236,16 +222,11 @@ def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
             calls["started"] = True
 
     monkeypatch.setattr(stb, "_post_message", _post_message)
-    monkeypatch.setattr(stb, "load_snapshot", lambda _: ("", ""))
-    monkeypatch.setattr(stb, "capture_tmux", lambda *_args, **_kwargs: "screen")
     monkeypatch.setattr(stb.threading, "Thread", DummyThread)
-
-    with stb.ACTIVE_MONITOR_LOCK:
-        stb.ACTIVE_MONITORS_BY_CHANNEL["C1"] = 1
 
     stb._handle_now_command("C1", "thread1", "1:1.0")
 
-    assert any("処理中" in text for _, text in sent)
+    assert any("取得しています" in text for _, text in sent)
     assert calls["started"] is True
 
 
@@ -275,14 +256,9 @@ def test_now_uses_parent_thread_ts(monkeypatch):
             return None
 
     monkeypatch.setattr(stb, "_post_message", _post_message)
-    monkeypatch.setattr(stb, "load_snapshot", lambda _: ("", ""))
-    monkeypatch.setattr(stb, "capture_tmux", lambda *_args, **_kwargs: "screen")
     monkeypatch.setattr(stb.threading, "Thread", DummyThread)
 
-    message = {"thread_ts": "parent-ts", "ts": "child-ts"}
-    thread_ts = stb._get_thread_ts_from_message(message)
-
-    stb._handle_now_command("C1", thread_ts, "1:1.0")
+    stb._handle_now_command("C1", "parent-ts", "1:1.0")
 
     assert any(ts == "parent-ts" for _, _, ts in sent)
 
@@ -313,14 +289,7 @@ def test_sessions_output_handles_missing_fields(tmp_path, monkeypatch):
         "C1": "1:1.0",
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- C1 → -" in out
 
 
@@ -348,28 +317,14 @@ def test_sessions_output_is_code_block(tmp_path, monkeypatch):
         "C1": {"pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"},
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert out.startswith("- ")
 
 
 def test_sessions_output_when_empty(monkeypatch):
     monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", "/tmp/does-not-exist.json")
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert out == "(no active sessions)"
 
 
@@ -455,14 +410,7 @@ def test_sessions_output_combinations(tmp_path, monkeypatch):
         "C4": "1:4.0",
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- chan-a → /tmp/a" in out
     assert "- chan-b → -" in out
     assert "- C3 → /tmp/c" in out
@@ -595,14 +543,7 @@ def test_sessions_line_formatting_with_name_and_dir(tmp_path, monkeypatch):
         "C1": {"pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"},
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- chan-a → /tmp/a" in out
 
 
@@ -615,14 +556,7 @@ def test_sessions_line_formatting_without_dir(tmp_path, monkeypatch):
         "C1": {"pane": "1:1.0", "name": "chan-a"},
     })
 
-    captured = {}
-
-    def say(text):
-        captured["text"] = text
-
-    stb.handle_sessions_message({}, say)
-
-    out = captured.get("text", "")
+    out = stb._build_sessions_output()
     assert "- chan-a → -" in out
 
 
@@ -672,3 +606,19 @@ def test_escaped_now_command_uses_parent_thread_ts(monkeypatch):
     stb.handle_message(event, stb.logger)
 
     assert calls == [("C1", "parent-ts", "1:1.0")]
+
+
+def test_ctlc_command_dispatches_with_event_ts(monkeypatch):
+    calls = []
+
+    def _handle_ctlc(channel_id, thread_ts, tmux_target):
+        calls.append((channel_id, thread_ts, tmux_target))
+        return True
+
+    monkeypatch.setattr(stb, "_handle_ctlc_command", _handle_ctlc)
+    monkeypatch.setattr(stb, "get_target_pane", lambda *_: "1:1.0")
+
+    event = {"channel": "C1", "ts": "123.456", "text": "/ctlc", "user": "U1"}
+    stb.handle_message(event, stb.logger)
+
+    assert calls == [("C1", "123.456", "1:1.0")]

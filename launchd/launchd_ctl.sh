@@ -44,14 +44,6 @@ case "$cmd" in
       fi
     fi
     ;;
-  restart)
-    if [ -f "$PLIST_DEST_PATH" ]; then
-      launchctl unload "$PLIST_DEST_PATH"
-    fi
-    ensure_plist
-    launchctl load "$PLIST_DEST_PATH"
-    echo "restarted: $PLIST_DEST_PATH"
-    ;;
   status)
     launchctl list | rg slack_tmux_bridge || true
     ;;
@@ -59,7 +51,7 @@ case "$cmd" in
     tail -f "$HOME/Library/Logs/slack_tmux_bridge.log"
     ;;
   *)
-    echo "usage: $0 {install|start|stop|restart|status|log}"
+    echo "usage: $0 {install|start|stop|status|log}"
     exit 1
     ;;
 esac

@@ -166,7 +166,6 @@ You can also use the helper script:
 ./launchd/launchd_ctl.sh install
 ./launchd/launchd_ctl.sh start
 ./launchd/launchd_ctl.sh stop
-./launchd/launchd_ctl.sh restart
 ./launchd/launchd_ctl.sh status
 ./launchd/launchd_ctl.sh log
 ```

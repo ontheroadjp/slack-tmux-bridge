@@ -166,7 +166,6 @@ launchctl unload ~/Library/LaunchAgents/com.slack_tmux_bridge.plist
 ./launchd/launchd_ctl.sh install
 ./launchd/launchd_ctl.sh start
 ./launchd/launchd_ctl.sh stop
-./launchd/launchd_ctl.sh restart
 ./launchd/launchd_ctl.sh status
 ./launchd/launchd_ctl.sh log
 ```

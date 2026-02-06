@@ -7,7 +7,7 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Slack integration**: Bolt Socket Mode receives channel messages, posts replies, and exposes slash commands.
 - **Pre-clear and clean output**: Runs `tmux clear-history` + `Ctrl+L` before each command, then extracts everything after the echoed prompt (`> [prompt]`).
 - **Input ergonomics**: Numeric messages auto-run, text messages stay pending until you press “Execute (Enter)”, and selected slash commands send prebuilt inputs.
-- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread.
+- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread. The bridge also posts a snapshot when monitoring detects output has stabilized.
 - **Permission prompt watch**: After sending Enter, the bridge watches tmux output and posts a snippet to the thread if an approval prompt appears.
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless escaped as `\rm`.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
@@ -208,14 +208,14 @@ python slack_tmux_bridge.py
 ### 4. Slack operations
 
 1. Send a message to the configured channel.
-   - Text requires pressing the “Execute (Enter)” button that appears in the thread.
+   - Text requires pressing the “Execute (Enter)” button that appears in the thread; after Enter the bridge polls until output stabilizes and posts a snapshot (timeout offers a continue button).
    - Numeric-only messages send automatically.
    - `text == "/sessions"` (or `\/sessions`) shows connected channel names and directories.
    - `text == "/dir"` (or `\/dir`) shows the connected directory for the channel.
    - `text == "/now"` (or `\/now`) polls for pane changes and replies after the output stops changing; if it keeps changing for `NOW_WATCH_TIMEOUT_SEC`, it posts a timeout message with a “continue watch” button.
    - `text == "/ctlc"` (or `\/ctlc`) sends Ctrl+C to the connected tmux pane.
    - If the saved pane target differs from the current pane resolved via `pane_id`, the bridge prompts to confirm updating the connection before running.
-2. For normal executions, the bridge does not post results; the AI agent replies in the thread using the appended instruction. `/now` still captures output once and replies in the thread.
+2. The bridge posts a snapshot when output stabilizes; the AI agent still replies in the thread using the appended instruction.
 
 ### 5. Health monitoring
 

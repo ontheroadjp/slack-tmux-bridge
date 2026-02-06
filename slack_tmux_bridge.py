@@ -524,6 +524,67 @@ def _start_now_watch(thread_ts: str, channel_id: str, tmux_target: str):
     )
     watcher.start()
 
+def _watch_execute_output(thread_ts: str, channel_id: str, tmux_target: str):
+    if not thread_ts or not channel_id or not tmux_target:
+        return
+    if NOW_WATCH_INTERVAL_SEC <= 0 or NOW_WATCH_IDLE_COUNT <= 0 or NOW_WATCH_TIMEOUT_SEC <= 0:
+        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
+        return
+
+    start_ts = time.time()
+    idle_count = 0
+    try:
+        last_content = strip_ansi(capture_tmux(tmux_target, lines=True))
+    except Exception as e:
+        log(f"execute watch capture failed: {e}")
+        last_content = ""
+
+    while True:
+        if time.time() - start_ts >= NOW_WATCH_TIMEOUT_SEC:
+            _post_message(
+                channel_id,
+                "タイムアウトしました。監視を継続しますか？",
+                thread_ts=thread_ts,
+                blocks=[
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "監視を継続"},
+                                "action_id": "continue_execute_watch",
+                            }
+                        ],
+                    }
+                ],
+            )
+            return
+
+        time.sleep(NOW_WATCH_INTERVAL_SEC)
+        try:
+            current_content = strip_ansi(capture_tmux(tmux_target, lines=True))
+        except Exception as e:
+            log(f"execute watch capture failed: {e}")
+            current_content = last_content
+
+        if current_content != last_content:
+            last_content = current_content
+            idle_count = 0
+            continue
+
+        idle_count += 1
+        if idle_count >= NOW_WATCH_IDLE_COUNT:
+            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
+            return
+
+def _start_execute_watch(thread_ts: str, channel_id: str, tmux_target: str):
+    watcher = threading.Thread(
+        target=_watch_execute_output,
+        args=(thread_ts, channel_id, tmux_target),
+        daemon=True,
+    )
+    watcher.start()
+
 def _build_sessions_output():
     sessions = _get_sessions()
     if not sessions:
@@ -1099,7 +1160,7 @@ def handle_send_enter(ack, body):
 
     _post_message(
         channel_id,
-        ":rocket: 実行を開始しました（結果はこのスレッドに返信します）...",
+        ":rocket: 実行を開始しました（処理中）...",
         thread_ts=thread_ts,
     )
 
@@ -1109,6 +1170,7 @@ def handle_send_enter(ack, body):
     # Enterを送る
     send_enter(tmux_target, channel_id=channel_id)
     _start_permission_watch(thread_ts, channel_id, tmux_target)
+    _start_execute_watch(thread_ts, channel_id, tmux_target)
 
 # =====================
 # =====================
@@ -1321,6 +1383,25 @@ def handle_continue_now_watch(ack, body):
         return
 
     _handle_now_command(channel_id, thread_ts, tmux_target)
+
+# =====================
+# Slack: 実行の監視を継続
+# =====================
+@app.action("continue_execute_watch")
+def handle_continue_execute_watch(ack, body):
+    ack()
+    log("BUTTON CLICKED: continue_execute_watch")
+
+    channel_id = body["channel"]["id"]
+    thread_ts = _get_thread_ts_from_message(body["message"])
+    tmux_target = _get_tmux_target_or_notify(
+        channel_id,
+        message="⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal."
+    )
+    if not tmux_target:
+        return
+
+    _start_execute_watch(thread_ts, channel_id, tmux_target)
 
 # =====================
 # Slack: rebind confirmation

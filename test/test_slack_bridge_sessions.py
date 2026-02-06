@@ -314,6 +314,44 @@ def test_now_watch_timeout_posts_continue_button(monkeypatch):
     )
 
 
+def test_execute_watch_timeout_posts_continue_button(monkeypatch):
+    sent = []
+    counter = {"i": 0}
+
+    monkeypatch.setattr(stb, "NOW_WATCH_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(stb, "NOW_WATCH_IDLE_COUNT", 999)
+    monkeypatch.setattr(stb, "NOW_WATCH_TIMEOUT_SEC", 2)
+    monkeypatch.setattr(stb.time, "sleep", lambda *_: None)
+
+    def _post_message(channel, text, thread_ts=None, blocks=None):
+        sent.append((channel, text, blocks))
+
+    def _capture_tmux(*_args, **_kwargs):
+        counter["i"] += 1
+        return f"output-{counter['i']}"
+
+    class TimeStub:
+        def __init__(self):
+            self.current = 0
+
+        def __call__(self):
+            self.current += 1
+            return self.current
+
+    monkeypatch.setattr(stb, "_post_message", _post_message)
+    monkeypatch.setattr(stb, "capture_tmux", _capture_tmux)
+    monkeypatch.setattr(stb.time, "time", TimeStub())
+
+    stb._watch_execute_output("thread1", "C1", "1:1.0")
+
+    assert any("タイムアウト" in text for _, text, _ in sent)
+    assert any(
+        blocks
+        and any(e.get("action_id") == "continue_execute_watch" for e in blocks[0].get("elements", []))
+        for _, _, blocks in sent
+    )
+
+
 def test_command_menu_blocks_shape():
     blocks = stb.get_command_menu_blocks()
     assert blocks

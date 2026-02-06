@@ -802,11 +802,10 @@ def _require_thread_ts(message, channel_id: str):
     return None
 
 def _build_reply_instruction(channel_id: str, thread_ts: str) -> str:
-    return f"({channel_id}チャンネルの{thread_ts}スレッドに実行結果を返信してください。許可を求める場合も同スレッドに投稿してください。)"
+    return ""
 
 def _with_reply_instruction(text: str, channel_id: str, thread_ts: str) -> str:
-    instruction = _build_reply_instruction(channel_id, thread_ts)
-    return f"{text} {instruction}"
+    return text
 
 def _normalize_slash_command_text(text: str) -> str:
     if not text:
@@ -1053,7 +1052,7 @@ def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text
     # ② 同じメッセージのスレッドに操作ボタンを出す
     _post_message(
         channel_id,
-        "操作を選んでください（実行するとAIがスレッドに返信します）",
+        "操作を選んでください（実行すると結果をこのスレッドに投稿します）",
         thread_ts=thread_ts,
         blocks=[
             {

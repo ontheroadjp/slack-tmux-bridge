@@ -1,0 +1,10 @@
+{
+  "repo_id": "slack-tmux-bridge",
+  "package_manager": "unknown",
+  "doc_roots": [
+    "docs"
+  ],
+  "commands": {
+    "test": "pytest"
+  }
+}

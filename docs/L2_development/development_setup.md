@@ -1,14 +1,14 @@
 Status: Draft
-Last updated: 2026-02-02
+Last updated: 2026-02-04
 Evidence:
 - README.md:20-37
 - README.md:54-76
 - README.md:114-170
 - requirements.txt:1-3
 - requirements-dev.txt:1
-- .env.sample:1-16
-- slack_tmux_bridge.py:22-52
-- goslack.py:18-22
+- .env.sample:1-24
+- slack_tmux_bridge.py:22-55
+- goslack.py:18-21
 - launchd/com.slack_tmux_bridge.plist:1-23
 - launchd/launchd_ctl.sh:1-65
 
@@ -43,7 +43,10 @@ Evidence:
 - PERMISSION_WATCH_PATTERN
 - COMMAND_ALLOWLIST
 - COMMAND_DENYLIST
-根拠: .env.sample:1-16 / slack_tmux_bridge.py:22-52 / goslack.py:20-22
+根拠: .env.sample:1-24 / slack_tmux_bridge.py:22-55 / goslack.py:18-21
+
+# 補足（.env.sample 未記載の項目）
+- `TMUX_BIN` と `CHANNEL_IDLE_NOTIFY_*` はコード上で参照されるが、`.env.sample` には記載がない。根拠: slack_tmux_bridge.py:24,50-51 / .env.sample:1-24
 
 # 開発コマンド一覧
 | コマンド | 説明 | 根拠 |

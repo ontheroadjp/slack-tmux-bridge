@@ -1,13 +1,17 @@
 Status: Draft
-Last updated: 2026-02-02
+Last updated: 2026-02-04
 Evidence:
 - README.md:1-18
 - README.md:84-113
 - README.md:208-218
+- .env.sample:1-3
+- .github/workflows/ci.yml:1-20
 - slack_tmux_bridge.py:32-52
 - slack_tmux_bridge.py:150-219
 - slack_tmux_bridge.py:264-310
 - slack_tmux_bridge.py:516-583
+- slack_tmux_bridge.py:864-877
+- slack_tmux_bridge.py:1223-1243
 - slack_tmux_bridge.py:640-685
 - slack_tmux_bridge.py:892-972
 - goslack.py:11-16
@@ -41,7 +45,7 @@ Evidence:
 
 # 返信の取り扱い
 - 通常の実行結果は AI エージェントがスレッドに返信する前提で、プロンプト末尾に返信指示を付与する。根拠: README.md:10 / slack_tmux_bridge.py:601-607
-- `/now` や「👀 Geminiを見る」は tmux 出力を単発取得して返信する。根拠: README.md:215 / slack_tmux_bridge.py:516-583,1143-1163
+- `/now` や「👀 Geminiを見る」は tmux 出力を単発取得して返信する。根拠: README.md:215 / slack_tmux_bridge.py:864-877,1223-1243
 - 承認要求が発生した場合の見落としを防ぐため、Enter 送信後に tmux 出力を監視して該当パターンが出たらスレッドに抜粋を投稿する。根拠: slack_tmux_bridge.py:415-460,822-843,947-972
 
 # tmux 入出力制御
@@ -55,6 +59,8 @@ Evidence:
 # 単一起動制御
 - PID ファイルとプロセス一覧で二重起動を防止する。根拠: slack_tmux_bridge.py:73-123
 
+# CI/CD（実装への影響範囲）
+- GitHub Actions で `pytest` を実行する CI がある。根拠: .github/workflows/ci.yml:1-20
+
 # 実装上の未確認事項
 - `TARGET_CHANNEL_ID` の利用箇所は未確認。根拠: .env.sample:1-3 / slack_tmux_bridge.py に参照なし
-- CI/CD 設定は未確認（.github/workflows が存在しない）。根拠: リポジトリ内に該当ファイルなし

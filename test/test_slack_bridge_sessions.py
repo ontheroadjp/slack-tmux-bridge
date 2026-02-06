@@ -212,17 +212,11 @@ def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
     def _post_message(channel, text, thread_ts=None, blocks=None):
         sent.append((channel, text))
 
-    class DummyThread:
-        def __init__(self, target=None, args=(), daemon=None):
-            assert target == stb._capture_and_reply_once
-            self.args = args
-            self.daemon = daemon
-
-        def start(self):
-            calls["started"] = True
+    def _start_now_watch(thread_ts, channel_id, tmux_target):
+        calls["started"] = True
 
     monkeypatch.setattr(stb, "_post_message", _post_message)
-    monkeypatch.setattr(stb.threading, "Thread", DummyThread)
+    monkeypatch.setattr(stb, "_start_now_watch", _start_now_watch)
 
     stb._handle_now_command("C1", "thread1", "1:1.0")
 
@@ -261,6 +255,101 @@ def test_now_uses_parent_thread_ts(monkeypatch):
     stb._handle_now_command("C1", "parent-ts", "1:1.0")
 
     assert any(ts == "parent-ts" for _, _, ts in sent)
+
+
+def test_now_watch_replies_after_idle(monkeypatch):
+    calls = {"captured": 0}
+
+    monkeypatch.setattr(stb, "NOW_WATCH_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(stb, "NOW_WATCH_IDLE_COUNT", 3)
+    monkeypatch.setattr(stb, "NOW_WATCH_TIMEOUT_SEC", 180)
+    monkeypatch.setattr(stb.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(stb, "capture_tmux", lambda *_args, **_kwargs: "same-output")
+
+    def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt=""):
+        calls["captured"] += 1
+
+    monkeypatch.setattr(stb, "_capture_and_reply_once", _capture_and_reply_once)
+
+    stb._watch_now_output("thread1", "C1", "1:1.0")
+
+    assert calls["captured"] == 1
+
+
+def test_now_watch_timeout_posts_continue_button(monkeypatch):
+    sent = []
+    counter = {"i": 0}
+
+    monkeypatch.setattr(stb, "NOW_WATCH_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(stb, "NOW_WATCH_IDLE_COUNT", 999)
+    monkeypatch.setattr(stb, "NOW_WATCH_TIMEOUT_SEC", 2)
+    monkeypatch.setattr(stb.time, "sleep", lambda *_: None)
+
+    def _post_message(channel, text, thread_ts=None, blocks=None):
+        sent.append((channel, text, blocks))
+
+    def _capture_tmux(*_args, **_kwargs):
+        counter["i"] += 1
+        return f"output-{counter['i']}"
+
+    class TimeStub:
+        def __init__(self):
+            self.current = 0
+
+        def __call__(self):
+            self.current += 1
+            return self.current
+
+    monkeypatch.setattr(stb, "_post_message", _post_message)
+    monkeypatch.setattr(stb, "capture_tmux", _capture_tmux)
+    monkeypatch.setattr(stb.time, "time", TimeStub())
+
+    stb._watch_now_output("thread1", "C1", "1:1.0")
+
+    assert any("タイムアウト" in text for _, text, _ in sent)
+    assert any(
+        blocks
+        and any(e.get("action_id") == "continue_now_watch" for e in blocks[0].get("elements", []))
+        for _, _, blocks in sent
+    )
+
+
+def test_execute_watch_timeout_posts_continue_button(monkeypatch):
+    sent = []
+    counter = {"i": 0}
+
+    monkeypatch.setattr(stb, "NOW_WATCH_INTERVAL_SEC", 1.0)
+    monkeypatch.setattr(stb, "NOW_WATCH_IDLE_COUNT", 999)
+    monkeypatch.setattr(stb, "NOW_WATCH_TIMEOUT_SEC", 2)
+    monkeypatch.setattr(stb.time, "sleep", lambda *_: None)
+
+    def _post_message(channel, text, thread_ts=None, blocks=None):
+        sent.append((channel, text, blocks))
+
+    def _capture_tmux(*_args, **_kwargs):
+        counter["i"] += 1
+        return f"output-{counter['i']}"
+
+    class TimeStub:
+        def __init__(self):
+            self.current = 0
+
+        def __call__(self):
+            self.current += 1
+            return self.current
+
+    monkeypatch.setattr(stb, "_post_message", _post_message)
+    monkeypatch.setattr(stb, "capture_tmux", _capture_tmux)
+    monkeypatch.setattr(stb.time, "time", TimeStub())
+
+    stb._watch_execute_output("thread1", "C1", "1:1.0")
+
+    assert any("タイムアウト" in text for _, text, _ in sent)
+    assert any(
+        blocks
+        and any(e.get("action_id") == "continue_execute_watch" for e in blocks[0].get("elements", []))
+        for _, _, blocks in sent
+    )
 
 
 def test_command_menu_blocks_shape():

@@ -7,7 +7,7 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Slack integration**: Bolt Socket Mode receives channel messages, posts replies, and exposes slash commands.
 - **Pre-clear and clean output**: Runs `tmux clear-history` + `Ctrl+L` before each command, then extracts everything after the echoed prompt (`> [prompt]`).
 - **Input ergonomics**: Numeric messages auto-run, text messages stay pending until you press “Execute (Enter)”, and selected slash commands send prebuilt inputs.
-- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread.
+- **Reply delegation**: When executing, the bridge appends a reply instruction with `channel_id` and `thread_ts`, so the AI agent posts results (and any permission requests) directly to the Slack thread. The bridge also posts a snapshot when monitoring detects output has stabilized.
 - **Permission prompt watch**: After sending Enter, the bridge watches tmux output and posts a snippet to the thread if an approval prompt appears.
 - **Command filtering**: Allowlist + denylist rules ensure only safe commands reach tmux, with `rm` blocked by default unless escaped as `\rm`.
 - **Single-instance guard**: A PID file prevents duplicate Socket Mode connections and duplicate event streams.
@@ -69,6 +69,7 @@ cp .env.sample .env
 - `PROMPT_CACHE_TTL_SEC` – retention window for cached prompts; maintenance workers purge expired entries.
 - `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` – idle notification interval and cooldown (per channel).
 - `PERMISSION_WATCH_SEC` / `PERMISSION_WATCH_INTERVAL_SEC` / `PERMISSION_WATCH_PATTERN` – after sending Enter, watch tmux output for approval prompts and post a snippet to the thread.
+- `NOW_WATCH_INTERVAL_SEC` / `NOW_WATCH_IDLE_COUNT` / `NOW_WATCH_TIMEOUT_SEC` – `/now` polling interval, consecutive idle count to reply, and timeout before prompting to continue.
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:
@@ -207,14 +208,14 @@ python slack_tmux_bridge.py
 ### 4. Slack operations
 
 1. Send a message to the configured channel.
-   - Text requires pressing the “Execute (Enter)” button that appears in the thread.
+   - Text requires pressing the “Execute (Enter)” button that appears in the thread; after Enter the bridge polls until output stabilizes and posts a snapshot (timeout offers a continue button).
    - Numeric-only messages send automatically.
    - `text == "/sessions"` (or `\/sessions`) shows connected channel names and directories.
    - `text == "/dir"` (or `\/dir`) shows the connected directory for the channel.
-   - `text == "/now"` (or `\/now`) captures the current Gemini output once.
+   - `text == "/now"` (or `\/now`) polls for pane changes and replies after the output stops changing; if it keeps changing for `NOW_WATCH_TIMEOUT_SEC`, it posts a timeout message with a “continue watch” button.
    - `text == "/ctlc"` (or `\/ctlc`) sends Ctrl+C to the connected tmux pane.
    - If the saved pane target differs from the current pane resolved via `pane_id`, the bridge prompts to confirm updating the connection before running.
-2. For normal executions, the bridge does not post results; the AI agent replies in the thread using the appended instruction. `/now` still captures output once and replies in the thread.
+2. The bridge posts a snapshot when output stabilizes; the AI agent still replies in the thread using the appended instruction.
 
 ### 5. Health monitoring
 
@@ -235,7 +236,7 @@ python slack_tmux_bridge.py
 
 - `/sessions`: Slack command that posts a list of channel names and connected directories.
 - `/dir`: Slack command that returns the connected directory.
-- `/now`: Slack command that captures the latest Gemini output once.
+- `/now`: Slack command that waits until pane output stabilizes, then posts the capture (timeout offers a continue button).
 - `/ctlc`: Slack command that sends Ctrl+C to the connected tmux pane.
 - `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered), `--add`, and optional `--channel` override for session maintenance.
 

@@ -6,7 +6,7 @@ Evidence:
 - README.md:114-170
 - requirements.txt:1-3
 - requirements-dev.txt:1
-- .env.sample:1-24
+- .env.sample:1-27
 - slack_tmux_bridge.py:22-55
 - goslack.py:18-21
 - launchd/com.slack_tmux_bridge.plist:1-23
@@ -18,7 +18,7 @@ Evidence:
 
 # 初期セットアップ手順
 1. 仮想環境を作成し依存関係をインストールする。根拠: README.md:29-37
-2. `.env.sample` を `.env` にコピーし、トークン等を設定する。根拠: README.md:54-60 / .env.sample:1-16
+2. `.env.sample` を `.env` にコピーし、トークン等を設定する。根拠: README.md:54-60 / .env.sample:1-27
 3. tmux 内で Gemini CLI を起動する。根拠: README.md:189-193
 4. 対象ペインで `python goslack.py` を実行し、チャンネルとペインを紐付ける。根拠: README.md:189-196 / goslack.py:285-359
 5. `python slack_tmux_bridge.py` を起動する。根拠: README.md:197-203
@@ -41,12 +41,15 @@ Evidence:
 - PERMISSION_WATCH_SEC
 - PERMISSION_WATCH_INTERVAL_SEC
 - PERMISSION_WATCH_PATTERN
+- NOW_WATCH_INTERVAL_SEC
+- NOW_WATCH_IDLE_COUNT
+- NOW_WATCH_TIMEOUT_SEC
 - COMMAND_ALLOWLIST
 - COMMAND_DENYLIST
-根拠: .env.sample:1-24 / slack_tmux_bridge.py:22-55 / goslack.py:18-21
+根拠: .env.sample:1-27 / slack_tmux_bridge.py:22-58 / goslack.py:18-21
 
 # 補足（.env.sample 未記載の項目）
-- `TMUX_BIN` と `CHANNEL_IDLE_NOTIFY_*` はコード上で参照されるが、`.env.sample` には記載がない。根拠: slack_tmux_bridge.py:24,50-51 / .env.sample:1-24
+- `TMUX_BIN` と `CHANNEL_IDLE_NOTIFY_*` はコード上で参照されるが、`.env.sample` には記載がない。根拠: slack_tmux_bridge.py:24,53-54 / .env.sample:1-27
 
 # 開発コマンド一覧
 | コマンド | 説明 | 根拠 |
@@ -59,6 +62,7 @@ Evidence:
 | `python goslack.py list` | セッション一覧 | README.md:96-104 |
 | `python goslack.py rm <number>` | セッション削除 | README.md:106-110 |
 | `pytest` | テスト実行 | requirements-dev.txt:1 |
+| `./scripts/test_now.sh` | `/now` 監視テストの短縮実行 | scripts/test_now.sh:1-20 |
 
 # テスト/リント/フォーマット手順
 - テスト: `pytest`。根拠: requirements-dev.txt:1 / test/ 配下

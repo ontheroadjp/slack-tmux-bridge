@@ -41,11 +41,11 @@ Evidence:
 # 入力種別と UX
 - 数字のみ: 事前に画面/履歴をクリアし、即時実行する。根拠: slack_tmux_bridge.py:264-272,822-843
 - テキスト: 入力を tmux に送った後、Slack のボタン操作で Enter を送信する。根拠: slack_tmux_bridge.py:844-890,947-972
-- `/sessions` `/dir` `/now` `/ctlc` などのコマンドは即時処理する。根拠: slack_tmux_bridge.py:668-685
+- `/sessions` `/dir` `/now` `/ctlc` などのコマンドは即時処理する。根拠: slack_tmux_bridge.py:812-833
 
 # 返信の取り扱い
 - 通常の実行結果は AI エージェントがスレッドに返信する前提で、プロンプト末尾に返信指示を付与する。根拠: README.md:10 / slack_tmux_bridge.py:601-607
-- `/now` や「👀 Geminiを見る」は tmux 出力を単発取得して返信する。根拠: README.md:215 / slack_tmux_bridge.py:864-877,1223-1243
+- `/now` は tmux 出力の変化を監視し、停止後に出力を返信する（タイムアウト時は継続ボタン）。「👀 Geminiを見る」は単発取得して返信する。根拠: slack_tmux_bridge.py:466-531,1284-1304
 - 承認要求が発生した場合の見落としを防ぐため、Enter 送信後に tmux 出力を監視して該当パターンが出たらスレッドに抜粋を投稿する。根拠: slack_tmux_bridge.py:415-460,822-843,947-972
 
 # tmux 入出力制御

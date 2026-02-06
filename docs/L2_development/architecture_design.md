@@ -64,4 +64,4 @@ tmux (Gemini CLI)
 
 # セキュリティ観点
 - コマンド allowlist/denylist による危険操作の制限。根拠: slack_tmux_bridge.py:150-168
-- トークンは .env で管理し、リポジトリに含めない。根拠: README.md:54-76 / .env.sample:1-24
+- トークンは .env で管理し、リポジトリに含めない。根拠: README.md:54-76 / .env.sample:1-27

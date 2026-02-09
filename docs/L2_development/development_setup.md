@@ -4,6 +4,7 @@ Evidence:
 - README.md:20-37
 - README.md:54-76
 - README.md:114-170
+- docs/L2_development/notify_design.md
 - requirements.txt:1-3
 - requirements-dev.txt:1
 - .env.sample:1-27
@@ -71,6 +72,7 @@ Evidence:
 # デバッグ方法
 - `LOG_LEVEL=DEBUG` で Slack SDK/Bolt の詳細ログを出す。根拠: README.md:206 / slack_tmux_bridge.py:60-71
 - `/now` で現在の tmux 出力を単発取得する。根拠: README.md:215 / slack_tmux_bridge.py:674-681,787-800
+- notify（Codex 連携）の payload 契約・失敗時挙動は `docs/L2_development/notify_design.md` を参照。根拠: docs/L2_development/notify_design.md
 
 # macOS launchd での常駐運用
 - `launchd/com.slack_tmux_bridge.plist` と `launchd/launchd_ctl.sh` を使用可能。根拠: README.md:123-170 / launchd/com.slack_tmux_bridge.plist:1-23 / launchd/launchd_ctl.sh:1-65

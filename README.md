@@ -70,8 +70,9 @@ cp .env.sample .env
 - `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` – idle notification interval and cooldown (per channel).
 - `PERMISSION_WATCH_SEC` / `PERMISSION_WATCH_INTERVAL_SEC` / `PERMISSION_WATCH_PATTERN` – after sending Enter, watch tmux output for approval prompts and post a snippet to the thread.
 - `NOW_WATCH_INTERVAL_SEC` / `NOW_WATCH_IDLE_COUNT` / `NOW_WATCH_TIMEOUT_SEC` – `/now` polling interval, consecutive idle count to reply, and timeout before prompting to continue.
-- `EXECUTE_RESULT_MODE` – behavior after pressing “Execute (Enter)”: `poll` (existing watch), `notify` (Codex notify only), `both` (run both).
+- `EXECUTE_RESULT_MODE` – behavior after pressing “Execute (Enter)”: `poll` (watch output and post snapshot), `notify` (notify-only), `both` (notify-first with poll fallback; dedupe enabled).
 - `NOTIFY_INGRESS_*` – optional local notify ingress for `slack_tmux_bridge` (`http` localhost-only or `uds`), including payload size and rate-limit settings.
+- `NOTIFY_DEDUPE_TTL_SEC` – retention window for dedupe keys used by `poll/notify` coordination.
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:
@@ -325,6 +326,14 @@ Payload must be a JSON object and must include either:
 - or `pane_id` (resolved via `tmp/notify_context.json`)
 
 The message body is taken from `last-assistant-message`.
+
+### EXECUTE_RESULT_MODE details
+
+- `poll`: bridge posts tmux snapshot when output stabilizes.
+- `notify`: bridge skips poll watch and expects notify delivery path.
+- `both`: notify is preferred; if notify is not observed for the same `pane_id/thread_ts`, poll snapshot is posted as fallback.
+
+Duplicate prevention uses a shared key space (`pane_id/thread_ts/turn-id`) in `tmp/notify_delivery_dedupe.json`.
 
 Example (`/sessions` output):
 

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -232,8 +233,10 @@ def test_select_fallback_round_robin_state(tmp_path, monkeypatch):
 def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
     sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    dedupe_path = tmp_path / "tmp" / "notify_delivery_dedupe.json"
     monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
     monkeypatch.setattr(goslack, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setattr(goslack, "NOTIFY_DEDUPE_FILE", str(dedupe_path))
     goslack.save_json(
         str(sessions_path),
         {
@@ -252,7 +255,7 @@ def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(
         goslack,
         "send_slack_message",
-        lambda ch, text, thread_ts=None: sent.update({"channel": ch, "text": text, "thread_ts": thread_ts}),
+        lambda ch, text, thread_ts=None: sent.update({"channel": ch, "text": text, "thread_ts": thread_ts}) or True,
     )
 
     payload = json.dumps(
@@ -268,6 +271,52 @@ def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
     assert sent["channel"] == "C1"
     assert sent["text"] == "done"
     assert sent["thread_ts"] == "123.456"
+    dedupe = goslack.load_json(str(dedupe_path))
+    assert dedupe.get("entries")
+
+
+def test_handle_notify_skips_when_duplicate_key_exists(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    dedupe_path = tmp_path / "tmp" / "notify_delivery_dedupe.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(goslack, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setattr(goslack, "NOTIFY_DEDUPE_FILE", str(dedupe_path))
+    goslack.save_json(
+        str(sessions_path),
+        {
+            "C1": {"pane": "1:1.0", "pane_id": "%1", "dir": "/tmp/a", "name": "chan-a"},
+        },
+    )
+    goslack.save_json(str(notify_context_path), {"%1": {"channel_id": "C1", "thread_ts": "123.456"}})
+    goslack.save_json(
+        str(dedupe_path),
+        {
+            "entries": {
+                "%1:123.456:turn-1": {
+                    "pane_id": "%1",
+                    "thread_ts": "123.456",
+                    "turn_id": "turn-1",
+                    "source": "notify",
+                    "ts": time.time(),
+                }
+            }
+        },
+    )
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux,123,0")
+    monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
+    monkeypatch.setattr(goslack, "send_slack_message", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not post")))
+
+    payload = json.dumps(
+        {
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "input-messages": ["hello"],
+            "last-assistant-message": "done",
+        }
+    )
+    goslack.handle_notify(payload)
 
 
 def test_handle_notify_skips_when_not_mapped(tmp_path, monkeypatch):

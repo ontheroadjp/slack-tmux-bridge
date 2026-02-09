@@ -26,7 +26,7 @@
 | コンポーネント | 役割 |
 | --- | --- |
 | `slack_tmux_bridge.py` | Slackイベントを受け、tmuxに入力し、コマンド系の結果のみ返信するメインブリッジ |
-| `goslack.py` | tmux ペインと Slack チャンネルの対応表を書き込む |
+| `goslack.py` | tmux ペインと Slack チャンネルの対応表を書き込み、Codex notify を Slack に転送する |
 | `send_enter.sh` | tmux に Enter を送る最小ヘルパ |
 | `active_sessions.json` | Slack チャンネルID → pane_id/ペイン/ディレクトリ/チャンネル名のマッピング |
 | `tmp/` | スナップショット保存、PID ファイルなど |
@@ -56,6 +56,7 @@
 | `NOW_WATCH_INTERVAL_SEC` | `1` | `/now` 監視のポーリング間隔 | 出力変化の検知間隔を調整するため |
 | `NOW_WATCH_IDLE_COUNT` | `3` | `/now` の停止判定回数 | 変化が止まったとみなす閾値 |
 | `NOW_WATCH_TIMEOUT_SEC` | `180` | `/now` 監視タイムアウト | 変化が続く場合の打ち切りと継続促しのため |
+| `EXECUTE_RESULT_MODE` | `poll` | 実行ボタン押下後の結果取得方式 (`poll`/`notify`/`both`) | ポーリングと Codex notify の重複運用を制御するため |
 | `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---
@@ -85,10 +86,10 @@
 - `goslack.py list`: `active_sessions.json` の一覧を番号付きで表示（`num`, `channel_name`, `pane`, `pane_id`, `dir`）。
 - `goslack.py rm <number>`: 一覧の番号を指定して削除。
 - `goslack.py --add <pane>`: 別ペインから指定ペインを登録（対象ペインの `pane_current_path` を利用）。
-  - `--channel <NAME>` を併用した場合、チャンネル解決は指定名のみ（フォールバック無し）。
-  - 並び順は `ai-studio-01/02/03` が先頭（番号順）、それ以外はチャンネル名の昇順。
-  - チャンネル名が無い場合は `-` として扱われる。
-  - 番号が範囲外の場合はエラー終了する。
+- `goslack.py --add <pane> --channel <NAME>`: チャンネル解決を指定名のみに固定し、フォールバックを行わない。
+- `goslack.py list` の並び順: `ai-studio-01/02/03` が先頭（番号順）、それ以外はチャンネル名の昇順。チャンネル名が無い場合は `-`。
+- `goslack.py rm <number>`: 番号が範囲外の場合はエラー終了。
+- `goslack.py notify <payload>`: Codex CLI の `notify` JSON ペイロードを受け取り、現在の tmux ペインに紐づく Slack チャンネルへ通知する。
 
 #### 4.4.1 `list` の出力例
 
@@ -105,6 +106,12 @@ num	channel_name	pane	pane_id	dir
 ```
 python goslack.py rm 4
 ```
+
+### 4.5 Codex notify 連携
+- Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
+- `goslack.py notify` は JSON から `thread-id`, `turn-id`, `last-assistant-message` を取り出して整形し、Slack に投稿する。
+- 投稿先は tmux の現在 `pane_id` と `active_sessions.json` の `pane_id` の一致で解決し、同じ `pane_id` に記録された最新の Slack `thread_ts` へ返信する。
+- `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
 
 ---
 
@@ -130,7 +137,7 @@ python goslack.py rm 4
 ### 5.3 入力の種類
 - **数字のみ**: 即実行（プリクリア → 入力 → Enter）。
 - **テキスト**: 受信時に tmux へ入力を送り、ボタンを表示。
-- 「▶︎ 実行（Enter）」で Enter 送信後、`/now` と同じ監視に入る。
+- 「▶︎ 実行（Enter）」で Enter 送信後、`EXECUTE_RESULT_MODE` が `poll` または `both` の場合に `/now` と同じ監視に入る。
   - 「👀 Geminiを見る」現在の tmux 出力を送信。
   - 「🗑️ プロンプト削除」Ctrl+U で入力行を消去。
 - **スラッシュコマンド**: `スラッシュコマンド` というメッセージによりボタンメニューを提示。
@@ -167,10 +174,10 @@ python goslack.py rm 4
 ## 7. 応答生成（コマンド系のみ）
 
 ### 7.1 `/now` と実行ボタンの監視取得
-- `/now` と「▶︎ 実行（Enter）」は `NOW_WATCH_INTERVAL_SEC` 間隔で tmux 出力を監視する。
+- `/now` は `NOW_WATCH_INTERVAL_SEC` 間隔で tmux 出力を監視する。
 - 連続 `NOW_WATCH_IDLE_COUNT` 回変化がなければ、`tmux capture-pane` で取得して返信する。
 - 変化が `NOW_WATCH_TIMEOUT_SEC` を超えて続く場合はタイムアウトを通知し、「監視を継続」ボタンを提示する。
-- 実行ボタンは Enter 送信後に監視し、停止したタイミングでスナップショットを投稿する。
+- 実行ボタンは `EXECUTE_RESULT_MODE` が `poll` または `both` の場合のみ、Enter 送信後に監視して停止タイミングでスナップショットを投稿する。
 
 ### 7.2 抽出ロジック
 1. `"> prompt"` 行を探し、その行以降のみ採用。

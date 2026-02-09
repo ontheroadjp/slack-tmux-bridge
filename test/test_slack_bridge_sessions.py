@@ -711,3 +711,22 @@ def test_ctlc_command_dispatches_with_event_ts(monkeypatch):
     stb.handle_message(event, stb.logger)
 
     assert calls == [("C1", "123.456", "1:1.0")]
+
+
+def test_send_enter_skips_poll_watch_when_execute_mode_notify(monkeypatch):
+    called = {"execute_watch": 0, "record": 0}
+
+    monkeypatch.setattr(stb, "EXECUTE_RESULT_MODE", "notify")
+    monkeypatch.setattr(stb, "_get_tmux_target_or_notify", lambda *_args, **_kwargs: "1:1.0")
+    monkeypatch.setattr(stb, "_post_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "pre_clear_tmux", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "send_enter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "_start_permission_watch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "_record_notify_context", lambda *_args, **_kwargs: called.__setitem__("record", called["record"] + 1))
+    monkeypatch.setattr(stb, "_start_execute_watch", lambda *_args, **_kwargs: called.__setitem__("execute_watch", called["execute_watch"] + 1))
+
+    body = {"channel": {"id": "C1"}, "message": {"ts": "123.456"}}
+    stb.handle_send_enter(lambda: None, body)
+
+    assert called["record"] == 1
+    assert called["execute_watch"] == 0

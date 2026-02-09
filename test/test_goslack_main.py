@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -226,3 +227,96 @@ def test_select_fallback_round_robin_state(tmp_path, monkeypatch):
 
     name = goslack._select_fallback_channel(active_sessions)
     assert name == "ai-studio-01"
+
+
+def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(goslack, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    goslack.save_json(
+        str(sessions_path),
+        {
+            "C1": {"pane": "1:1.0", "pane_id": "%1", "dir": "/tmp/a", "name": "chan-a"},
+        },
+    )
+    goslack.save_json(
+        str(notify_context_path),
+        {"%1": {"channel_id": "C1", "thread_ts": "123.456"}},
+    )
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux,123,0")
+    monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
+
+    sent = {}
+    monkeypatch.setattr(
+        goslack,
+        "send_slack_message",
+        lambda ch, text, thread_ts=None: sent.update({"channel": ch, "text": text, "thread_ts": thread_ts}),
+    )
+
+    payload = json.dumps(
+        {
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "input-messages": ["hello"],
+            "last-assistant-message": "done",
+        }
+    )
+    goslack.handle_notify(payload)
+
+    assert sent["channel"] == "C1"
+    assert sent["text"] == "done"
+    assert sent["thread_ts"] == "123.456"
+
+
+def test_handle_notify_skips_when_not_mapped(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    goslack.save_json(
+        str(sessions_path),
+        {
+            "C1": {"pane": "1:1.0", "pane_id": "%1", "dir": "/tmp/a", "name": "chan-a"},
+        },
+    )
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux,123,0")
+    monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%9")
+    monkeypatch.setattr(goslack, "send_slack_message", lambda *_: (_ for _ in ()).throw(AssertionError("must not post")))
+
+    payload = json.dumps(
+        {
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "input-messages": ["hello"],
+            "last-assistant-message": "done",
+        }
+    )
+    goslack.handle_notify(payload)
+
+
+def test_handle_notify_skips_when_thread_context_missing(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(goslack, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    goslack.save_json(
+        str(sessions_path),
+        {
+            "C1": {"pane": "1:1.0", "pane_id": "%1", "dir": "/tmp/a", "name": "chan-a"},
+        },
+    )
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux,123,0")
+    monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
+    monkeypatch.setattr(goslack, "send_slack_message", lambda *_: (_ for _ in ()).throw(AssertionError("must not post")))
+
+    payload = json.dumps(
+        {
+            "thread-id": "thread-1",
+            "turn-id": "turn-1",
+            "input-messages": ["hello"],
+            "last-assistant-message": "done",
+        }
+    )
+    goslack.handle_notify(payload)

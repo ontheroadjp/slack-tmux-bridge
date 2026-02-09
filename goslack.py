@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
+TMP_DIR = os.path.join(BASE_DIR, "tmp")
+NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
 AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 
 # Load environment variables
@@ -100,11 +102,14 @@ def _get_slack_client():
         sys.exit(1)
     return WebClient(token=SLACK_BOT_TOKEN)
 
-def send_slack_message(channel, text):
+def send_slack_message(channel, text, thread_ts=None):
     """Sends a message to Slack using WebClient"""
     try:
         client = _get_slack_client()
-        client.chat_postMessage(channel=channel, text=text)
+        kwargs = {"channel": channel, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        client.chat_postMessage(**kwargs)
     except Exception as e:
         print(f"⚠️ Warning: Failed to send Slack message: {e}")
 
@@ -208,6 +213,88 @@ def _extract_pane(value):
         return value.get("pane_id") or value.get("pane")
     return value
 
+def _load_notify_context():
+    data = load_json(NOTIFY_CONTEXT_FILE)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+def _find_notify_context_for_pane(pane_id):
+    context = _load_notify_context()
+    if not pane_id:
+        return None
+    value = context.get(pane_id)
+    if isinstance(value, dict):
+        return value
+    return None
+
+def _find_channel_id_by_pane_id(active_sessions, pane_id):
+    if not pane_id:
+        return None
+    for channel_id, value in active_sessions.items():
+        if isinstance(value, dict) and value.get("pane_id") == pane_id:
+            return channel_id
+    return None
+
+def _parse_notify_payload(raw_payload):
+    if not raw_payload:
+        return None
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+def _trim_notify_text(value, max_len=2800):
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("```", "'''")
+    if len(text) > max_len:
+        text = text[:max_len] + "\n...(truncated)"
+    return text
+
+def _build_codex_notify_message(payload):
+    last_assistant_message = _trim_notify_text(payload.get("last-assistant-message", ""))
+    if last_assistant_message:
+        return last_assistant_message
+    return "(empty notify message)"
+
+def _read_notify_payload(arg_payload):
+    if arg_payload and arg_payload != "-":
+        return arg_payload
+    data = sys.stdin.read()
+    return data.strip() if data else ""
+
+def handle_notify(payload_arg):
+    raw_payload = _read_notify_payload(payload_arg)
+    payload = _parse_notify_payload(raw_payload)
+    if not payload:
+        print("⚠️ Warning: notify payload is not valid JSON object.")
+        return
+
+    if not os.environ.get("TMUX"):
+        print("⚠️ Warning: notify called outside tmux; skipped.")
+        return
+
+    pane_id = get_tmux_pane_id()
+    active_sessions = load_json(ACTIVE_SESSIONS_FILE)
+    channel_id = _find_channel_id_by_pane_id(active_sessions, pane_id)
+    if not channel_id:
+        print(f"⚠️ Warning: No active Slack mapping found for pane {pane_id}.")
+        return
+
+    notify_ctx = _find_notify_context_for_pane(pane_id) or {}
+    thread_ts = notify_ctx.get("thread_ts")
+    if not thread_ts:
+        print(f"⚠️ Warning: No thread_ts context found for pane {pane_id}.")
+        return
+
+    message = _build_codex_notify_message(payload)
+    send_slack_message(channel_id, message, thread_ts=thread_ts)
+
 def _rr_state_path():
     base_dir = os.path.dirname(ACTIVE_SESSIONS_FILE)
     return os.path.join(base_dir, "tmp", "ai_studio_rr.json")
@@ -295,6 +382,13 @@ def main():
         metavar="MESSAGE",
         help="Post a Slack message to the removed channel",
     )
+    notify_parser = subparsers.add_parser("notify", help="Receive Codex notify payload and post to mapped Slack channel")
+    notify_parser.add_argument(
+        "payload",
+        nargs="?",
+        default="-",
+        help="Codex notify JSON payload (if omitted or '-', read from stdin)",
+    )
     parser.add_argument("--add", metavar="PANE", help="Register a target tmux pane (e.g., 1:2.0)")
     parser.add_argument(
         "--channel",
@@ -309,6 +403,9 @@ def main():
         return
     if args.command == "rm":
         remove_sessions_by_number(args.number, notify_message=args.notify)
+        return
+    if args.command == "notify":
+        handle_notify(args.payload)
         return
 
     # 1. Get current directory (or target pane directory)

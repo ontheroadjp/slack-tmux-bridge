@@ -34,6 +34,7 @@ ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 ENTER_SCRIPT = os.path.join(BASE_DIR, "send_enter.sh")
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 PID_FILE = os.path.join(TMP_DIR, "slack_tmux_bridge.pid")
+NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
 
 # Command filtering (comma-separated patterns; use "all" to match everything)
 COMMAND_ALLOWLIST = os.environ.get("COMMAND_ALLOWLIST", "all")
@@ -60,6 +61,9 @@ PERMISSION_WATCH_PATTERN = os.environ.get(
 NOW_WATCH_INTERVAL_SEC = float(os.environ.get("NOW_WATCH_INTERVAL_SEC", "1"))
 NOW_WATCH_IDLE_COUNT = int(os.environ.get("NOW_WATCH_IDLE_COUNT", "3"))
 NOW_WATCH_TIMEOUT_SEC = int(os.environ.get("NOW_WATCH_TIMEOUT_SEC", "180"))
+EXECUTE_RESULT_MODE = os.environ.get("EXECUTE_RESULT_MODE", "poll").lower()  # poll | notify | both
+if EXECUTE_RESULT_MODE not in {"poll", "notify", "both"}:
+    EXECUTE_RESULT_MODE = "poll"
 
 # =====================
 # logging & utility
@@ -377,6 +381,33 @@ def _load_active_sessions():
     except Exception as e:
         log(f"Error reading active sessions: {e}")
         return {}
+
+def _load_notify_context():
+    if not os.path.exists(NOTIFY_CONTEXT_FILE):
+        return {}
+    try:
+        with open(NOTIFY_CONTEXT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_notify_context(context):
+    _atomic_write_json(NOTIFY_CONTEXT_FILE, context)
+
+def _record_notify_context(channel_id: str, thread_ts: str):
+    if not channel_id or not thread_ts:
+        return
+    sessions = _get_sessions()
+    entry = sessions.get(channel_id)
+    if not isinstance(entry, dict):
+        return
+    pane_id = entry.get("pane_id")
+    if not pane_id:
+        return
+    context = _load_notify_context()
+    context[pane_id] = {"channel_id": channel_id, "thread_ts": thread_ts, "updated_at": time.time()}
+    _save_notify_context(context)
 
 def _get_sessions():
     return _load_active_sessions()
@@ -1039,6 +1070,7 @@ def _handle_numeric_message(channel_id: str, thread_ts: str, tmux_target: str, t
     # ④ Enter送信
     send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
     _start_permission_watch(thread_ts, channel_id, tmux_target)
+    _record_notify_context(channel_id, thread_ts)
 
 def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
     # ① 文字だけ tmux に送る
@@ -1048,6 +1080,7 @@ def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text
         thread_ts=thread_ts,
         channel_id=channel_id
     )
+    _record_notify_context(channel_id, thread_ts)
 
     # ② 同じメッセージのスレッドに操作ボタンを出す
     _post_message(
@@ -1169,7 +1202,9 @@ def handle_send_enter(ack, body):
     # Enterを送る
     send_enter(tmux_target, channel_id=channel_id)
     _start_permission_watch(thread_ts, channel_id, tmux_target)
-    _start_execute_watch(thread_ts, channel_id, tmux_target)
+    _record_notify_context(channel_id, thread_ts)
+    if EXECUTE_RESULT_MODE in ("poll", "both"):
+        _start_execute_watch(thread_ts, channel_id, tmux_target)
 
 # =====================
 # =====================

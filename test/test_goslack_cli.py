@@ -49,3 +49,16 @@ def test_cli_rm_by_number(tmp_path, monkeypatch):
     assert "C2" not in sessions
     assert "C1" in sessions
     assert "C9" in sessions
+
+
+def test_cli_notify_calls_handler(monkeypatch):
+    called = {}
+
+    def _handle_notify(payload):
+        called["payload"] = payload
+
+    monkeypatch.setattr(goslack, "handle_notify", _handle_notify)
+    monkeypatch.setattr(sys, "argv", ["goslack.py", "notify", "{\"thread-id\":\"t1\"}"])
+    goslack.main()
+
+    assert called["payload"] == "{\"thread-id\":\"t1\"}"

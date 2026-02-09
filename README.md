@@ -70,6 +70,7 @@ cp .env.sample .env
 - `CHANNEL_IDLE_NOTIFY_SEC` / `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` – idle notification interval and cooldown (per channel).
 - `PERMISSION_WATCH_SEC` / `PERMISSION_WATCH_INTERVAL_SEC` / `PERMISSION_WATCH_PATTERN` – after sending Enter, watch tmux output for approval prompts and post a snippet to the thread.
 - `NOW_WATCH_INTERVAL_SEC` / `NOW_WATCH_IDLE_COUNT` / `NOW_WATCH_TIMEOUT_SEC` – `/now` polling interval, consecutive idle count to reply, and timeout before prompting to continue.
+- `EXECUTE_RESULT_MODE` – behavior after pressing “Execute (Enter)”: `poll` (existing watch), `notify` (Codex notify only), `both` (run both).
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:
@@ -239,6 +240,7 @@ python slack_tmux_bridge.py
 - `/now`: Slack command that waits until pane output stabilizes, then posts the capture (timeout offers a continue button).
 - `/ctlc`: Slack command that sends Ctrl+C to the connected tmux pane.
 - `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered), `--add`, and optional `--channel` override for session maintenance.
+  - `goslack.py notify`: receives Codex CLI `notify` JSON payload and posts it to the Slack channel mapped to the current tmux pane.
 
 ## Tips
 
@@ -283,6 +285,25 @@ codex() {
   command codex "$@"
 }
 ```
+
+### Codex CLI notify -> Slack
+
+Codex CLI can run an external program when a turn completes. Configure it to call `goslack.py notify`; the bridge polling (`/now`) remains unchanged.
+
+`~/.codex/config.toml`:
+
+```toml
+[notify]
+command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/goslack.py", "notify"]
+```
+
+Codex passes one JSON argument to `notify` with keys like:
+- `thread-id`
+- `turn-id`
+- `input-messages`
+- `last-assistant-message`
+
+`goslack.py notify` resolves the current tmux `pane_id`, finds the mapped Slack channel in `active_sessions.json`, then replies to the latest Slack thread recorded for that pane. It posts only `last-assistant-message` as the thread body.
 
 Example (`/sessions` output):
 

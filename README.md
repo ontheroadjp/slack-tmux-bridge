@@ -93,6 +93,7 @@ sudo,rm -rf,/\brm\b/,mkfs,dd,/\bshutdown\b/,/\breboot\b/,/curl\s+.*\|\s*sh/,/wge
 - `goslack.py` writes `active_sessions.json` atomically, avoiding partial writes.
 - If another Slack channel already points to the same tmux pane, running `goslack.py` removes the stale entry so only the current channel remains.
 - `active_sessions.json` stores `pane_id`, `pane`, `dir`, and `name` (channel name) per channel ID.
+- During normal registration, `goslack.py` prefers `TMUX_PANE` (when present) and re-resolves `pane` from `pane_id` before saving, so the mapped pane matches the executing pane.
 - `goslack.py list` prints numbered mappings (including `pane_id`); `goslack.py rm <number>` removes a mapping by its list number.
 - `goslack.py --add <pane>` registers a target tmux pane from another pane (uses the target pane’s current directory).
   - Optional: `--channel <NAME>` to override the channel name (no fallback).

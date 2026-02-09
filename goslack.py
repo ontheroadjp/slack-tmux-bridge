@@ -5,6 +5,7 @@ import argparse
 import json
 import subprocess
 import tempfile
+import re
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 
@@ -53,8 +54,11 @@ def get_tmux_pane_id():
         if not os.environ.get("TMUX"):
             print("Error: This script must be run inside a tmux session.")
             sys.exit(1)
-            
-        cmd = [TMUX_BIN, "display-message", "-p", "#{pane_id}"]
+        tmux_pane = os.environ.get("TMUX_PANE")
+        if tmux_pane:
+            cmd = [TMUX_BIN, "display-message", "-p", "-t", tmux_pane, "#{pane_id}"]
+        else:
+            cmd = [TMUX_BIN, "display-message", "-p", "#{pane_id}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -68,7 +72,11 @@ def get_tmux_target():
         if not os.environ.get("TMUX"):
             print("Error: This script must be run inside a tmux session.")
             sys.exit(1)
-        cmd = [TMUX_BIN, "display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]
+        tmux_pane = os.environ.get("TMUX_PANE")
+        if tmux_pane:
+            cmd = [TMUX_BIN, "display-message", "-p", "-t", tmux_pane, "#{session_name}:#{window_index}.#{pane_index}"]
+        else:
+            cmd = [TMUX_BIN, "display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -84,6 +92,19 @@ def get_tmux_pane_id_from_target(tmux_target):
     except subprocess.CalledProcessError as e:
         print(f"Error getting tmux pane id: {e}")
         sys.exit(1)
+
+def get_tmux_target_from_pane_id(pane_id):
+    try:
+        cmd = [TMUX_BIN, "display-message", "-p", "-t", pane_id, "#{session_name}:#{window_index}.#{pane_index}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+def _is_valid_tmux_target(value):
+    if not isinstance(value, str):
+        return False
+    return bool(re.match(r"^[^:]+:\d+\.\d+$", value.strip()))
 
 def get_tmux_pane_cwd(tmux_target):
     try:
@@ -270,12 +291,15 @@ def _resolve_channel_by_name(client, channel_name):
         return None
     return _find_channel_by_name(client, channel_name)
 
-def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd):
+def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=None):
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
+    pane_keys = {pane_id, pane_target}
+    if pane_aliases:
+        pane_keys.update(alias for alias in pane_aliases if alias)
     duplicates = [
         ch
         for ch, pane in active_sessions.items()
-        if _extract_pane(pane) in {pane_id, pane_target} and ch != target_channel
+        if _extract_pane(pane) in pane_keys and ch != target_channel
     ]
     for dup in duplicates:
         del active_sessions[dup]
@@ -351,9 +375,17 @@ def main():
     if not args.add:
         pane_id = get_tmux_pane_id()
         pane_target = get_tmux_target()
+        pane_aliases = []
+        # Resolve target from pane_id to avoid capturing a different active pane in edge cases.
+        resolved_target = get_tmux_target_from_pane_id(pane_id)
+        if _is_valid_tmux_target(resolved_target):
+            pane_aliases.append(pane_target)
+            pane_target = resolved_target
+    else:
+        pane_aliases = []
     
     # 5. Update active sessions
-    _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd)
+    _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=pane_aliases)
     
     # 6. Send Slack Notification
     send_slack_message(

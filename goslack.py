@@ -5,10 +5,6 @@ import argparse
 import json
 import subprocess
 import tempfile
-import time
-import socket
-import urllib.request
-import urllib.error
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 
@@ -18,16 +14,12 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
-NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
-NOTIFY_DEDUPE_FILE = os.path.join(TMP_DIR, "notify_delivery_dedupe.json")
 AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 
 # Load environment variables
 load_dotenv(DOTENV_PATH)
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
-NOTIFY_DEDUPE_TTL_SEC = int(os.environ.get("NOTIFY_DEDUPE_TTL_SEC", "900"))
-NOTIFY_FORWARD_TIMEOUT_SEC = float(os.environ.get("NOTIFY_FORWARD_TIMEOUT_SEC", "3"))
 
 def load_json(path):
     if not os.path.exists(path):
@@ -222,224 +214,6 @@ def _extract_pane(value):
         return value.get("pane_id") or value.get("pane")
     return value
 
-def _load_notify_context():
-    data = load_json(NOTIFY_CONTEXT_FILE)
-    if isinstance(data, dict):
-        return data
-    return {}
-
-def _find_notify_context_for_pane(pane_id):
-    context = _load_notify_context()
-    if not pane_id:
-        return None
-    value = context.get(pane_id)
-    if isinstance(value, dict):
-        return value
-    return None
-
-def _find_channel_id_by_pane_id(active_sessions, pane_id):
-    if not pane_id:
-        return None
-    for channel_id, value in active_sessions.items():
-        if isinstance(value, dict) and value.get("pane_id") == pane_id:
-            return channel_id
-    return None
-
-def _load_notify_dedupe():
-    data = load_json(NOTIFY_DEDUPE_FILE)
-    if isinstance(data, dict):
-        return data
-    return {}
-
-def _save_notify_dedupe(state):
-    save_json(NOTIFY_DEDUPE_FILE, state)
-
-def _prune_notify_dedupe(state, now_ts=None):
-    now_ts = now_ts if now_ts is not None else time.time()
-    ttl = max(NOTIFY_DEDUPE_TTL_SEC, 1)
-    entries = state.get("entries", {})
-    if not isinstance(entries, dict):
-        return {"entries": {}}
-    kept = {}
-    for key, value in entries.items():
-        if not isinstance(value, dict):
-            continue
-        ts = value.get("ts")
-        if not isinstance(ts, (int, float)):
-            continue
-        if now_ts - ts <= ttl:
-            kept[key] = value
-    return {"entries": kept}
-
-def _build_delivery_key(pane_id: str, thread_ts: str, turn_id: str):
-    return f"{pane_id}:{thread_ts}:{turn_id if turn_id else '-'}"
-
-def _seen_delivery_event(pane_id: str, thread_ts: str, turn_id: str):
-    if not pane_id or not thread_ts:
-        return False
-    state = _prune_notify_dedupe(_load_notify_dedupe())
-    entries = state.get("entries", {})
-    if not isinstance(entries, dict):
-        return False
-    key = _build_delivery_key(pane_id, thread_ts, turn_id)
-    return key in entries
-
-def _record_delivery_event(pane_id: str, thread_ts: str, turn_id: str, source: str):
-    if not pane_id or not thread_ts:
-        return
-    now_ts = time.time()
-    state = _prune_notify_dedupe(_load_notify_dedupe(), now_ts=now_ts)
-    entries = state.setdefault("entries", {})
-    key = _build_delivery_key(pane_id, thread_ts, turn_id)
-    entries[key] = {
-        "pane_id": pane_id,
-        "thread_ts": thread_ts,
-        "turn_id": turn_id,
-        "source": source,
-        "ts": now_ts,
-    }
-    _save_notify_dedupe(state)
-
-def _parse_notify_payload(raw_payload):
-    if not raw_payload:
-        return None
-    try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-def _trim_notify_text(value, max_len=2800):
-    text = (value or "").strip()
-    if not text:
-        return ""
-    text = text.replace("```", "'''")
-    if len(text) > max_len:
-        text = text[:max_len] + "\n...(truncated)"
-    return text
-
-def _build_codex_notify_message(payload):
-    last_assistant_message = _trim_notify_text(payload.get("last-assistant-message", ""))
-    if last_assistant_message:
-        return last_assistant_message
-    return "(empty notify message)"
-
-def _read_notify_payload(arg_payload):
-    if arg_payload and arg_payload != "-":
-        return arg_payload
-    data = sys.stdin.read()
-    return data.strip() if data else ""
-
-def _forward_notify_payload_http(raw_payload):
-    host = os.environ.get("NOTIFY_HTTP_HOST", "127.0.0.1")
-    port = int(os.environ.get("NOTIFY_HTTP_PORT", "8765"))
-    path = os.environ.get("NOTIFY_HTTP_PATH", "/notify")
-    url = f"http://{host}:{port}{path}"
-    req = urllib.request.Request(
-        url=url,
-        data=raw_payload.encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=NOTIFY_FORWARD_TIMEOUT_SEC) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return False, f"http {exc.code}: {body}"
-    except Exception as exc:
-        return False, f"http request failed: {exc}"
-    if not body:
-        return False, "http response empty"
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return False, f"http response is not json: {body}"
-    if not isinstance(payload, dict):
-        return False, "http response is not object"
-    if payload.get("ok") is True:
-        return True, ""
-    return False, payload.get("error") or "http ingress rejected payload"
-
-def _forward_notify_payload_uds(raw_payload):
-    uds_path = os.environ.get("NOTIFY_UDS_PATH", os.path.join(TMP_DIR, "notify_ingress.sock"))
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(NOTIFY_FORWARD_TIMEOUT_SEC)
-        sock.connect(uds_path)
-        sock.sendall(raw_payload.encode("utf-8") + b"\n")
-        response = sock.recv(4096).decode("utf-8", errors="replace").strip()
-        sock.close()
-    except Exception as exc:
-        return False, f"uds request failed: {exc}"
-    if not response:
-        return False, "uds response empty"
-    try:
-        payload = json.loads(response)
-    except json.JSONDecodeError:
-        return False, f"uds response is not json: {response}"
-    if not isinstance(payload, dict):
-        return False, "uds response is not object"
-    if payload.get("ok") is True:
-        return True, ""
-    return False, payload.get("error") or "uds ingress rejected payload"
-
-def _forward_notify_payload(raw_payload):
-    transport = os.environ.get("NOTIFY_INGRESS_TRANSPORT", "http").lower()
-    if transport == "http":
-        return _forward_notify_payload_http(raw_payload)
-    if transport == "uds":
-        return _forward_notify_payload_uds(raw_payload)
-    return False, f"unsupported NOTIFY_INGRESS_TRANSPORT: {transport}"
-
-def _handle_notify_legacy_direct(payload):
-    if not os.environ.get("TMUX"):
-        print("⚠️ Warning: legacy notify called outside tmux; skipped.")
-        return
-
-    pane_id = get_tmux_pane_id()
-    active_sessions = load_json(ACTIVE_SESSIONS_FILE)
-    channel_id = _find_channel_id_by_pane_id(active_sessions, pane_id)
-    if not channel_id:
-        print(f"⚠️ Warning: No active Slack mapping found for pane {pane_id}.")
-        return
-
-    notify_ctx = _find_notify_context_for_pane(pane_id) or {}
-    thread_ts = notify_ctx.get("thread_ts")
-    if not thread_ts:
-        print(f"⚠️ Warning: No thread_ts context found for pane {pane_id}.")
-        return
-
-    turn_id = payload.get("turn-id")
-    if _seen_delivery_event(pane_id, thread_ts, turn_id):
-        print(f"ℹ️ Skip duplicate notify delivery for pane={pane_id} thread_ts={thread_ts} turn_id={turn_id}")
-        return
-
-    message = _build_codex_notify_message(payload)
-    if send_slack_message(channel_id, message, thread_ts=thread_ts):
-        _record_delivery_event(pane_id, thread_ts, turn_id, source="legacy-notify")
-
-def handle_notify(payload_arg):
-    raw_payload = _read_notify_payload(payload_arg)
-    payload = _parse_notify_payload(raw_payload)
-    if not payload:
-        print("⚠️ Warning: notify payload is not valid JSON object.")
-        return
-
-    forwarded, reason = _forward_notify_payload(raw_payload)
-    if forwarded:
-        print("ℹ️ notify payload forwarded to slack_tmux_bridge ingress.")
-        return
-
-    print(f"⚠️ Warning: notify forwarding failed: {reason}")
-    if os.environ.get("GOSLACK_NOTIFY_LEGACY_DIRECT_POST", "0") == "1":
-        print("⚠️ Warning: deprecated legacy direct Slack notify path enabled (GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1).")
-        _handle_notify_legacy_direct(payload)
-        return
-    print("ℹ️ Hint: enable slack_tmux_bridge notify ingress or set GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1 temporarily.")
-
 def _rr_state_path():
     base_dir = os.path.dirname(ACTIVE_SESSIONS_FILE)
     return os.path.join(base_dir, "tmp", "ai_studio_rr.json")
@@ -527,13 +301,6 @@ def main():
         metavar="MESSAGE",
         help="Post a Slack message to the removed channel",
     )
-    notify_parser = subparsers.add_parser("notify", help="Forward Codex notify payload to slack_tmux_bridge notify ingress")
-    notify_parser.add_argument(
-        "payload",
-        nargs="?",
-        default="-",
-        help="Codex notify JSON payload (if omitted or '-', read from stdin)",
-    )
     parser.add_argument("--add", metavar="PANE", help="Register a target tmux pane (e.g., 1:2.0)")
     parser.add_argument(
         "--channel",
@@ -549,10 +316,6 @@ def main():
     if args.command == "rm":
         remove_sessions_by_number(args.number, notify_message=args.notify)
         return
-    if args.command == "notify":
-        handle_notify(args.payload)
-        return
-
     # 1. Get current directory (or target pane directory)
     if args.add:
         pane_target = args.add

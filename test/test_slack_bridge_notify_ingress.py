@@ -249,3 +249,18 @@ def test_notify_ingress_accept_then_delivery_posts_to_slack(tmp_path, monkeypatc
     assert posted["text"] == "notify message"
     assert dedupe["pane_id"] == "%1"
     assert dedupe["thread_ts"] == "123.456"
+
+
+def test_run_notify_cli_forwards_payload(monkeypatch, capsys):
+    monkeypatch.setattr(stb, "_forward_notify_payload", lambda raw: (True, "") if raw else (False, "empty"))
+    rc = stb.run_notify_cli('{"channel_id":"C1","thread_ts":"123.456","last-assistant-message":"done"}')
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "forwarded to slack_tmux_bridge ingress" in out
+
+
+def test_run_notify_cli_rejects_invalid_payload(capsys):
+    rc = stb.run_notify_cli("not-json")
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "notify payload rejected" in out

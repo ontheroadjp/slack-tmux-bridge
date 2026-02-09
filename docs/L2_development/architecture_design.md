@@ -2,6 +2,7 @@ Status: Draft
 Last updated: 2026-02-04
 Evidence:
 - README.md:7-18
+- docs/L2_development/notify_design.md
 - slack_tmux_bridge.py:13-15
 - slack_tmux_bridge.py:32-55
 - slack_tmux_bridge.py:202-219
@@ -31,6 +32,7 @@ tmux (Gemini CLI)
 - goslack.py: Slack チャンネルと tmux ペインの対応表を作成/更新/一覧/削除。根拠: goslack.py:164-205,267-283
 - send_enter.sh: tmux へ Enter を送るヘルパ。根拠: send_enter.sh:1-8
 - active_sessions.json: チャンネルID→pane_id/pane/dir/name のマッピング。根拠: goslack.py:267-283
+- notify 経路の詳細設計（payload 契約、ingress、配送キュー、再試行）は `docs/L2_development/notify_design.md` を参照。根拠: docs/L2_development/notify_design.md
 
 # ディレクトリ構成の意図
 - docs/: プロジェクト設計・仕様ドキュメント。根拠: docs/ 配下

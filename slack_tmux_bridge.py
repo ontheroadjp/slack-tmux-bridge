@@ -535,6 +535,20 @@ def _normalize_notify_payload(payload: dict) -> dict:
             normalized["thread_ts"] = thread_id.strip()
     return normalized
 
+def _validate_notify_payload_for_thread_reply(payload: dict):
+    if not isinstance(payload, dict):
+        return False, "payload must be object"
+    channel_id = payload.get("channel_id")
+    if not isinstance(channel_id, str) or not channel_id.strip():
+        return False, "missing required field: channel_id"
+    thread_ts = payload.get("thread_ts")
+    if not isinstance(thread_ts, str) or not thread_ts.strip():
+        return False, "missing required field: thread_ts"
+    message = payload.get("last-assistant-message")
+    if not isinstance(message, str) or not message.strip():
+        return False, "missing required field: last-assistant-message"
+    return True, ""
+
 def run_notify_cli(payload_arg: str) -> int:
     raw_payload = _read_notify_payload_arg(payload_arg)
     ok, error, payload = _validate_notify_payload_bytes(raw_payload.encode("utf-8"))
@@ -543,6 +557,10 @@ def run_notify_cli(payload_arg: str) -> int:
         return 1
 
     normalized_payload = _normalize_notify_payload(payload)
+    valid, reason = _validate_notify_payload_for_thread_reply(normalized_payload)
+    if not valid:
+        print(f"⚠️ Warning: notify payload rejected: {reason}")
+        return 1
     normalized_raw_payload = json.dumps(normalized_payload, ensure_ascii=False)
     forwarded, reason = _forward_notify_payload(normalized_raw_payload)
     if forwarded:

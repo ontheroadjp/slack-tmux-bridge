@@ -32,8 +32,8 @@ Evidence:
 - 現在のディレクトリ名を Slack チャンネル名として解決し、見つからない場合は `ai-studio-01/02/03` を順にフォールバックする。根拠: README.md:84-113 / goslack.py:245-260
 - `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py:267-283
 - `list` は番号付きでセッションを出力し、`rm <number>` で削除する。根拠: goslack.py:164-205
-- Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、`channel-id`/`pane-id`/`thread-id` を snake_case キー（`channel_id`/`pane_id`/`thread_ts`）へ不足時のみ補完する。Slack 投稿責務は bridge 側に寄せる。根拠: slack_tmux_bridge.py
-- notify 宛先解決は `channel_id/thread_ts` を優先し、`pane_id` 指定時は `active_sessions.json` から `channel_id` を補完、`thread_ts` は payload → `tmp/notify_context.json` の順で補完する。`thread_ts` 未解決時はチャンネル返信で配送する。根拠: slack_tmux_bridge.py:582-658
+- Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、`channel-id`/`pane-id`/`thread-id` を snake_case キー（`channel_id`/`pane_id`/`thread_ts`）へ不足時のみ補完する。スレッド返信用途では `channel_id`/`thread_ts`/`last-assistant-message` を必須とし、欠落時は forwarding 前に reject する。根拠: slack_tmux_bridge.py
+- notify 宛先解決は payload の `channel_id/thread_ts` を用いる（スレッド返信契約）。根拠: slack_tmux_bridge.py
 
 # Slack 受信 → tmux 実行
 - Slack message イベントのみ処理し、未接続チャンネルは無視する。根拠: slack_tmux_bridge.py:892-938

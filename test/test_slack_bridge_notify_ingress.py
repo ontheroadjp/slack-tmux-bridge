@@ -302,7 +302,7 @@ def test_run_notify_cli_normalizes_thread_id(monkeypatch):
         "_forward_notify_payload",
         _forward,
     )
-    rc = stb.run_notify_cli('{"thread-id":"123.456","last-assistant-message":"done"}')
+    rc = stb.run_notify_cli('{"channel-id":"C123","thread-id":"123.456","last-assistant-message":"done"}')
     assert rc == 0
     forwarded = captured["payload"]
     payload = stb.json.loads(forwarded)
@@ -320,7 +320,7 @@ def test_run_notify_cli_keeps_existing_thread_ts(monkeypatch):
         "_forward_notify_payload",
         _forward,
     )
-    rc = stb.run_notify_cli('{"thread-id":"123.456","thread_ts":"999.000","last-assistant-message":"done"}')
+    rc = stb.run_notify_cli('{"channel-id":"C123","thread-id":"123.456","thread_ts":"999.000","last-assistant-message":"done"}')
     assert rc == 0
     forwarded = captured["payload"]
     payload = stb.json.loads(forwarded)
@@ -351,7 +351,7 @@ def test_run_notify_cli_normalizes_pane_id(monkeypatch):
         return True, ""
 
     monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
-    rc = stb.run_notify_cli('{"pane-id":"%1","last-assistant-message":"done"}')
+    rc = stb.run_notify_cli('{"channel-id":"C123","thread-id":"123.456","pane-id":"%1","last-assistant-message":"done"}')
     assert rc == 0
     payload = stb.json.loads(captured["payload"])
     assert payload["pane_id"] == "%1"
@@ -367,9 +367,30 @@ def test_run_notify_cli_keeps_existing_channel_id_and_pane_id(monkeypatch):
 
     monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
     rc = stb.run_notify_cli(
-        '{"channel-id":"C-hyphen","channel_id":"C-snake","pane-id":"%9","pane_id":"%8","last-assistant-message":"done"}'
+        '{"channel-id":"C-hyphen","channel_id":"C-snake","thread-id":"123.456","pane-id":"%9","pane_id":"%8","last-assistant-message":"done"}'
     )
     assert rc == 0
     payload = stb.json.loads(captured["payload"])
     assert payload["channel_id"] == "C-snake"
     assert payload["pane_id"] == "%8"
+
+
+def test_run_notify_cli_rejects_when_channel_id_missing_after_normalization(capsys):
+    rc = stb.run_notify_cli('{"thread-id":"123.456","last-assistant-message":"done"}')
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "missing required field: channel_id" in out
+
+
+def test_run_notify_cli_rejects_when_thread_ts_missing_after_normalization(capsys):
+    rc = stb.run_notify_cli('{"channel-id":"C123","last-assistant-message":"done"}')
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "missing required field: thread_ts" in out
+
+
+def test_run_notify_cli_rejects_when_last_assistant_message_missing(capsys):
+    rc = stb.run_notify_cli('{"channel-id":"C123","thread-id":"123.456"}')
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "missing required field: last-assistant-message" in out

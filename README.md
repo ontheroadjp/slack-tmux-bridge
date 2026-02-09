@@ -289,70 +289,12 @@ codex() {
 }
 ```
 
-### Codex CLI notify -> Slack
+### Codex notify integration
 
-Codex CLI can run an external program when a turn completes. Configure it to call `slack_tmux_bridge.py notify`; the bridge polling (`/now`) remains unchanged.
+Codex can call `slack_tmux_bridge.py notify` after each turn.  
+Notify payload contract, ingress transport (`http`/`uds`), queue/retry behavior, and failure handling are documented in:
 
-`~/.codex/config.toml`:
-
-```toml
-[notify]
-command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py", "notify"]
-```
-
-Codex passes one JSON argument to `notify` with keys like:
-- `thread-id`
-- `turn-id`
-- `input-messages`
-- `last-assistant-message`
-
-`slack_tmux_bridge.py notify` normalizes payload keys before forwarding to `slack_tmux_bridge` ingress using `NOTIFY_INGRESS_TRANSPORT` (`http` or `uds`).
-- Normalization rules:
-  - if `channel_id` is missing and `channel-id` is present, map `channel-id` to `channel_id`
-  - if `pane_id` is missing and `pane-id` is present, map `pane-id` to `pane_id`
-  - if `thread_ts` is missing and `thread-id` is present, map `thread-id` to `thread_ts`
-- Existing snake_case keys are prioritized (no overwrite).
-The bridge is responsible for destination resolution and final Slack posting.
-
-### Notify ingress on slack_tmux_bridge
-
-You can enable a local notify receiver on the bridge itself:
-
-- `NOTIFY_INGRESS_ENABLED=1`
-- `NOTIFY_INGRESS_TRANSPORT=http` with `NOTIFY_HTTP_HOST=127.0.0.1` (localhost-only) and `NOTIFY_HTTP_PORT` / `NOTIFY_HTTP_PATH`
-- or `NOTIFY_INGRESS_TRANSPORT=uds` with `NOTIFY_UDS_PATH` / `NOTIFY_UDS_MODE`
-- `NOTIFY_FORWARD_TIMEOUT_SEC` controls timeout (seconds) for `slack_tmux_bridge.py notify` forwarding requests
-
-Security controls:
-
-- payload size limit: `NOTIFY_MAX_PAYLOAD_BYTES`
-- rate limit: `NOTIFY_RATE_LIMIT_COUNT` per `NOTIFY_RATE_LIMIT_WINDOW_SEC`
-
-Delivery reliability:
-
-- accepted notify payloads are persisted to `tmp/notify_delivery_queue.json`
-- failed Slack posts are retried with backoff (`NOTIFY_RETRY_*`)
-- expired queue items are dropped by `NOTIFY_QUEUE_TTL_SEC`
-- pending queue items are replayed on startup by the background worker
-- logs include delivery failures and last error details
-
-Payload must be a JSON object and must include either:
-
-- `channel_id` (with optional `thread_ts`)
-- or `pane_id`
-  - `channel_id` is resolved from `active_sessions.json` when omitted.
-  - `thread_ts` is resolved from payload first, then `tmp/notify_context.json`.
-  - if `thread_ts` is still unavailable, the bridge posts to the channel (non-thread reply).
-
-The message body is taken from `last-assistant-message`.
-
-### EXECUTE_RESULT_MODE details
-
-- `poll`: bridge posts tmux snapshot when output stabilizes.
-- `notify`: bridge skips poll watch and expects notify delivery path.
-- `both`: notify is preferred; if notify is not observed for the same `pane_id/thread_ts`, poll snapshot is posted as fallback.
-
-Duplicate prevention uses a shared key space (`pane_id/thread_ts/turn-id`) in `tmp/notify_delivery_dedupe.json`.
+- `docs/L2_development/notify_design.md`
 
 Example (`/sessions` output):
 

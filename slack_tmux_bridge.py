@@ -292,7 +292,19 @@ def _resolve_tmux_target_from_pane_id(pane_id: str):
 # Slack App
 # =====================
 logger = logging.getLogger("slack_tmux_bridge")
-app = App(token=SLACK_BOT_TOKEN, logger=logger)
+
+def _is_token_verification_enabled() -> bool:
+    value = os.environ.get("SLACK_TOKEN_VERIFICATION_ENABLED")
+    if value is not None:
+        return value == "1"
+    # Test suite uses "xoxb-test" dummy token; skip auth.test in that case.
+    return not (SLACK_BOT_TOKEN or "").startswith("xoxb-test")
+
+app = App(
+    token=SLACK_BOT_TOKEN,
+    logger=logger,
+    token_verification_enabled=_is_token_verification_enabled(),
+)
 
 def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None):
     ok, error = _post_message_with_result(channel_id, text, thread_ts=thread_ts, blocks=blocks)

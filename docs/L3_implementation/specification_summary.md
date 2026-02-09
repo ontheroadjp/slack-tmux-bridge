@@ -33,6 +33,7 @@ Evidence:
 - `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py:267-283
 - `list` は番号付きでセッションを出力し、`rm <number>` で削除する。根拠: goslack.py:164-205
 - Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、Slack 投稿責務は bridge 側に寄せる。根拠: slack_tmux_bridge.py
+- notify 宛先解決は `channel_id/thread_ts` を優先し、`pane_id` 指定時は `active_sessions.json` から `channel_id` を補完、`thread_ts` は payload → `tmp/notify_context.json` の順で補完する。`thread_ts` 未解決時はチャンネル返信で配送する。根拠: slack_tmux_bridge.py:582-658
 
 # Slack 受信 → tmux 実行
 - Slack message イベントのみ処理し、未接続チャンネルは無視する。根拠: slack_tmux_bridge.py:892-938

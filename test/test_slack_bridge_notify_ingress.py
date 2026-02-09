@@ -98,6 +98,32 @@ def test_accept_notify_payload_rejects_when_destination_missing(monkeypatch):
     assert accepted is False
     assert reason == "destination not found"
 
+def test_accept_notify_payload_falls_back_to_channel_when_thread_missing(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
+
+    accepted, reason = stb._accept_notify_payload(
+        {"pane_id": "%1", "last-assistant-message": "hello"},
+        source="test",
+    )
+
+    assert accepted is True
+    assert reason == ""
+    state = stb._load_notify_queue()
+    assert len(state["items"]) == 1
+    assert state["items"][0]["channel_id"] == "C1"
+    assert state["items"][0]["thread_ts"] is None
+    assert state["items"][0]["text"] == "hello"
+
 
 def test_accept_notify_payload_rejects_by_rate_limit(monkeypatch):
     _reset_ingress_state()

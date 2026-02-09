@@ -331,8 +331,11 @@ Delivery reliability:
 
 Payload must be a JSON object and must include either:
 
-- `channel_id` + `thread_ts`
-- or `pane_id` (resolved via `tmp/notify_context.json`)
+- `channel_id` (with optional `thread_ts`)
+- or `pane_id`
+  - `channel_id` is resolved from `active_sessions.json` when omitted.
+  - `thread_ts` is resolved from payload first, then `tmp/notify_context.json`.
+  - if `thread_ts` is still unavailable, the bridge posts to the channel (non-thread reply).
 
 The message body is taken from `last-assistant-message`.
 

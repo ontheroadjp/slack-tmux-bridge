@@ -306,8 +306,11 @@ Codex passes one JSON argument to `notify` with keys like:
 - `last-assistant-message`
 
 `slack_tmux_bridge.py notify` normalizes payload keys before forwarding to `slack_tmux_bridge` ingress using `NOTIFY_INGRESS_TRANSPORT` (`http` or `uds`).
-- Normalization rule: if `thread_ts` is missing and `thread-id` is present, `thread-id` is mapped to `thread_ts`.
-- Existing `thread_ts` is always prioritized (no overwrite).
+- Normalization rules:
+  - if `channel_id` is missing and `channel-id` is present, map `channel-id` to `channel_id`
+  - if `pane_id` is missing and `pane-id` is present, map `pane-id` to `pane_id`
+  - if `thread_ts` is missing and `thread-id` is present, map `thread-id` to `thread_ts`
+- Existing snake_case keys are prioritized (no overwrite).
 The bridge is responsible for destination resolution and final Slack posting.
 
 ### Notify ingress on slack_tmux_bridge

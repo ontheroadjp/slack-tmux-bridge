@@ -115,7 +115,7 @@ python goslack.py rm 4
 ### 4.5 Codex notify 連携
 - Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
 - `slack_tmux_bridge.py notify` は受け取った JSON を最小正規化してから、`NOTIFY_INGRESS_TRANSPORT` (`http` / `uds`) に従って `slack_tmux_bridge` notify ingress へ転送する。
-- 正規化ルール: `thread_ts` が未指定かつ `thread-id` がある場合のみ、`thread-id -> thread_ts` を補完する（既存 `thread_ts` は上書きしない）。
+- 正規化ルール: `channel_id` が未指定かつ `channel-id` がある場合は `channel-id -> channel_id`、`pane_id` が未指定かつ `pane-id` がある場合は `pane-id -> pane_id`、`thread_ts` が未指定かつ `thread-id` がある場合は `thread-id -> thread_ts` を補完する（既存 snake_case キーは上書きしない）。
 - Slack 投稿先の解決と実際の投稿は `slack_tmux_bridge` 側の責務である。
 - notify 宛先解決は `channel_id/thread_ts` を優先し、`pane_id` がある場合は `active_sessions.json` から `channel_id` を補完し、`thread_ts` は payload → `tmp/notify_context.json` の順で補完する。
 - `thread_ts` が解決できない場合でも `channel_id` が解決できればチャンネル返信（非スレッド）で配送する。

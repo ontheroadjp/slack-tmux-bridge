@@ -117,9 +117,9 @@ python goslack.py rm 4
 - Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
 - `slack_tmux_bridge.py notify` は受け取った JSON を最小正規化してから、`NOTIFY_INGRESS_TRANSPORT` (`http` / `uds`) に従って `slack_tmux_bridge` notify ingress へ転送する。
 - 正規化ルール: `channel_id` が未指定かつ `channel-id` がある場合は `channel-id -> channel_id`、`pane_id` が未指定かつ `pane-id` がある場合は `pane-id -> pane_id`、`thread_ts` が未指定かつ `thread-id` がある場合は `thread-id -> thread_ts` を補完する（既存 snake_case キーは上書きしない）。
-- スレッド返信用途の notify では `channel_id` / `thread_ts` / `last-assistant-message` を必須とし、欠落時は forwarding 前に reject する。
+- スレッド返信用途の notify では `last-assistant-message` を必須とし、`channel_id` / `thread_ts` は payload 直値または `pane_id` からの宛先解決（`active_sessions.json` / `tmp/notify_context.json`）で確定できる必要がある。最終的に `channel_id` / `thread_ts` を解決できない場合は reject する。
 - Slack 投稿先の解決と実際の投稿は `slack_tmux_bridge` 側の責務である。
-- notify 宛先解決は payload の `channel_id/thread_ts` を用いる（スレッド返信の契約）。
+- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id` を起点に解決する（スレッド返信先が確定しない payload は reject）。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
 - `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。
 

@@ -538,15 +538,14 @@ def _normalize_notify_payload(payload: dict) -> dict:
 def _validate_notify_payload_for_thread_reply(payload: dict):
     if not isinstance(payload, dict):
         return False, "payload must be object"
-    channel_id = payload.get("channel_id")
-    if not isinstance(channel_id, str) or not channel_id.strip():
-        return False, "missing required field: channel_id"
-    thread_ts = payload.get("thread_ts")
-    if not isinstance(thread_ts, str) or not thread_ts.strip():
-        return False, "missing required field: thread_ts"
     message = payload.get("last-assistant-message")
     if not isinstance(message, str) or not message.strip():
         return False, "missing required field: last-assistant-message"
+    channel_id, thread_ts = _resolve_notify_destination(payload)
+    if not isinstance(channel_id, str) or not channel_id.strip():
+        return False, "missing required field: channel_id"
+    if not isinstance(thread_ts, str) or not thread_ts.strip():
+        return False, "missing required field: thread_ts"
     return True, ""
 
 def run_notify_cli(payload_arg: str) -> int:
@@ -670,16 +669,28 @@ def _accept_notify_payload(payload: dict, source: str):
             NOTIFY_INGRESS_STATE["last_error"] = "rate limited"
         return False, "rate limited"
 
+    message = payload.get("last-assistant-message") if isinstance(payload, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "missing required field: last-assistant-message"
+        return False, "missing required field: last-assistant-message"
+
     channel_id, thread_ts = _resolve_notify_destination(payload)
     if not channel_id:
         with NOTIFY_INGRESS_LOCK:
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "destination not found"
         return False, "destination not found"
+    if not isinstance(thread_ts, str) or not thread_ts.strip():
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "thread destination not found"
+        return False, "thread destination not found"
 
     pane_id = _resolve_pane_id_for_delivery(payload, channel_id)
     turn_id = payload.get("turn-id") if isinstance(payload, dict) else None
-    text = _build_ingress_notify_text(payload)
+    text = message.strip()
     _enqueue_notify_message(
         {
             "channel_id": channel_id,

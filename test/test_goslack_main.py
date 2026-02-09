@@ -25,6 +25,7 @@ def test_main_registers_session_with_dir_name_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(goslack, "_get_slack_client", lambda: FakeClient(channels))
     monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
     monkeypatch.setattr(goslack, "get_tmux_target", lambda: "1:1.0")
+    monkeypatch.setattr(goslack, "get_tmux_target_from_pane_id", lambda _: "1:1.0")
     monkeypatch.setattr(goslack, "send_slack_message", lambda *_: None)
     monkeypatch.setattr(os, "getcwd", lambda: "/tmp/workdir")
 
@@ -46,6 +47,7 @@ def test_main_fallback_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(goslack, "_get_slack_client", lambda: FakeClient(channels))
     monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%2")
     monkeypatch.setattr(goslack, "get_tmux_target", lambda: "2:3.4")
+    monkeypatch.setattr(goslack, "get_tmux_target_from_pane_id", lambda _: "2:3.4")
     monkeypatch.setattr(goslack, "send_slack_message", lambda *_: None)
     monkeypatch.setattr(os, "getcwd", lambda: "/tmp/unknown")
 
@@ -72,6 +74,7 @@ def test_main_removes_duplicate_pane(tmp_path, monkeypatch):
     monkeypatch.setattr(goslack, "_get_slack_client", lambda: FakeClient(channels))
     monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
     monkeypatch.setattr(goslack, "get_tmux_target", lambda: "1:1.0")
+    monkeypatch.setattr(goslack, "get_tmux_target_from_pane_id", lambda _: "1:1.0")
     monkeypatch.setattr(goslack, "send_slack_message", lambda *_: None)
     monkeypatch.setattr(os, "getcwd", lambda: "/tmp/workdir")
 
@@ -226,3 +229,43 @@ def test_select_fallback_round_robin_state(tmp_path, monkeypatch):
 
     name = goslack._select_fallback_channel(active_sessions)
     assert name == "ai-studio-01"
+
+
+def test_get_tmux_target_uses_tmux_pane_env(monkeypatch):
+    monkeypatch.setenv("TMUX", "1")
+    monkeypatch.setenv("TMUX_PANE", "%9")
+
+    captured = {"cmd": None}
+
+    class _Result:
+        stdout = "main:1.0\n"
+
+    def _run(cmd, capture_output, text, check):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(goslack.subprocess, "run", _run)
+    target = goslack.get_tmux_target()
+
+    assert target == "main:1.0"
+    assert captured["cmd"] == [goslack.TMUX_BIN, "display-message", "-p", "-t", "%9", "#{session_name}:#{window_index}.#{pane_index}"]
+
+
+def test_main_resolves_target_from_pane_id(tmp_path, monkeypatch):
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+
+    channels = [{"id": "C1", "name": "workdir"}]
+    monkeypatch.setattr(goslack, "_get_slack_client", lambda: FakeClient(channels))
+    monkeypatch.setattr(goslack, "get_tmux_pane_id", lambda: "%1")
+    monkeypatch.setattr(goslack, "get_tmux_target", lambda: "main:1.2")
+    monkeypatch.setattr(goslack, "get_tmux_target_from_pane_id", lambda _: "main:1.0")
+    monkeypatch.setattr(goslack, "send_slack_message", lambda *_: None)
+    monkeypatch.setattr(os, "getcwd", lambda: "/tmp/workdir")
+
+    monkeypatch.setattr(sys, "argv", ["goslack.py"])
+    goslack.main()
+
+    sessions = goslack.load_json(str(sessions_path))
+    assert sessions["C1"]["pane"] == "main:1.0"
+    assert sessions["C1"]["pane_id"] == "%1"

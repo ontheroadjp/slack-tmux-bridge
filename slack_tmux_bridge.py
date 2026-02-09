@@ -588,12 +588,24 @@ def _resolve_notify_destination(payload: dict):
         return channel_id, thread_ts
     pane_id = payload.get("pane_id")
     if not pane_id:
-        return None, None
+        return channel_id, thread_ts
+    if not channel_id:
+        sessions = _get_sessions()
+        if isinstance(sessions, dict):
+            for ch_id, value in sessions.items():
+                if not isinstance(value, dict):
+                    continue
+                if value.get("pane_id") == pane_id:
+                    channel_id = ch_id
+                    break
     context = _load_notify_context()
     ctx = context.get(pane_id) if isinstance(context, dict) else None
-    if not isinstance(ctx, dict):
-        return None, None
-    return ctx.get("channel_id"), ctx.get("thread_ts")
+    if isinstance(ctx, dict):
+        if not channel_id:
+            channel_id = ctx.get("channel_id")
+        if not thread_ts:
+            thread_ts = ctx.get("thread_ts")
+    return channel_id, thread_ts
 
 def _resolve_pane_id_for_delivery(payload: dict, channel_id: str):
     pane_id = payload.get("pane_id") if isinstance(payload, dict) else None
@@ -621,7 +633,7 @@ def _accept_notify_payload(payload: dict, source: str):
         return False, "rate limited"
 
     channel_id, thread_ts = _resolve_notify_destination(payload)
-    if not channel_id or not thread_ts:
+    if not channel_id:
         with NOTIFY_INGRESS_LOCK:
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "destination not found"

@@ -6,6 +6,9 @@ import json
 import subprocess
 import tempfile
 import time
+import socket
+import urllib.request
+import urllib.error
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 
@@ -24,6 +27,7 @@ load_dotenv(DOTENV_PATH)
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
 NOTIFY_DEDUPE_TTL_SEC = int(os.environ.get("NOTIFY_DEDUPE_TTL_SEC", "900"))
+NOTIFY_FORWARD_TIMEOUT_SEC = float(os.environ.get("NOTIFY_FORWARD_TIMEOUT_SEC", "3"))
 
 def load_json(path):
     if not os.path.exists(path):
@@ -328,15 +332,71 @@ def _read_notify_payload(arg_payload):
     data = sys.stdin.read()
     return data.strip() if data else ""
 
-def handle_notify(payload_arg):
-    raw_payload = _read_notify_payload(payload_arg)
-    payload = _parse_notify_payload(raw_payload)
-    if not payload:
-        print("⚠️ Warning: notify payload is not valid JSON object.")
-        return
+def _forward_notify_payload_http(raw_payload):
+    host = os.environ.get("NOTIFY_HTTP_HOST", "127.0.0.1")
+    port = int(os.environ.get("NOTIFY_HTTP_PORT", "8765"))
+    path = os.environ.get("NOTIFY_HTTP_PATH", "/notify")
+    url = f"http://{host}:{port}{path}"
+    req = urllib.request.Request(
+        url=url,
+        data=raw_payload.encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=NOTIFY_FORWARD_TIMEOUT_SEC) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return False, f"http {exc.code}: {body}"
+    except Exception as exc:
+        return False, f"http request failed: {exc}"
+    if not body:
+        return False, "http response empty"
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False, f"http response is not json: {body}"
+    if not isinstance(payload, dict):
+        return False, "http response is not object"
+    if payload.get("ok") is True:
+        return True, ""
+    return False, payload.get("error") or "http ingress rejected payload"
 
+def _forward_notify_payload_uds(raw_payload):
+    uds_path = os.environ.get("NOTIFY_UDS_PATH", os.path.join(TMP_DIR, "notify_ingress.sock"))
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(NOTIFY_FORWARD_TIMEOUT_SEC)
+        sock.connect(uds_path)
+        sock.sendall(raw_payload.encode("utf-8") + b"\n")
+        response = sock.recv(4096).decode("utf-8", errors="replace").strip()
+        sock.close()
+    except Exception as exc:
+        return False, f"uds request failed: {exc}"
+    if not response:
+        return False, "uds response empty"
+    try:
+        payload = json.loads(response)
+    except json.JSONDecodeError:
+        return False, f"uds response is not json: {response}"
+    if not isinstance(payload, dict):
+        return False, "uds response is not object"
+    if payload.get("ok") is True:
+        return True, ""
+    return False, payload.get("error") or "uds ingress rejected payload"
+
+def _forward_notify_payload(raw_payload):
+    transport = os.environ.get("NOTIFY_INGRESS_TRANSPORT", "http").lower()
+    if transport == "http":
+        return _forward_notify_payload_http(raw_payload)
+    if transport == "uds":
+        return _forward_notify_payload_uds(raw_payload)
+    return False, f"unsupported NOTIFY_INGRESS_TRANSPORT: {transport}"
+
+def _handle_notify_legacy_direct(payload):
     if not os.environ.get("TMUX"):
-        print("⚠️ Warning: notify called outside tmux; skipped.")
+        print("⚠️ Warning: legacy notify called outside tmux; skipped.")
         return
 
     pane_id = get_tmux_pane_id()
@@ -359,7 +419,26 @@ def handle_notify(payload_arg):
 
     message = _build_codex_notify_message(payload)
     if send_slack_message(channel_id, message, thread_ts=thread_ts):
-        _record_delivery_event(pane_id, thread_ts, turn_id, source="notify")
+        _record_delivery_event(pane_id, thread_ts, turn_id, source="legacy-notify")
+
+def handle_notify(payload_arg):
+    raw_payload = _read_notify_payload(payload_arg)
+    payload = _parse_notify_payload(raw_payload)
+    if not payload:
+        print("⚠️ Warning: notify payload is not valid JSON object.")
+        return
+
+    forwarded, reason = _forward_notify_payload(raw_payload)
+    if forwarded:
+        print("ℹ️ notify payload forwarded to slack_tmux_bridge ingress.")
+        return
+
+    print(f"⚠️ Warning: notify forwarding failed: {reason}")
+    if os.environ.get("GOSLACK_NOTIFY_LEGACY_DIRECT_POST", "0") == "1":
+        print("⚠️ Warning: deprecated legacy direct Slack notify path enabled (GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1).")
+        _handle_notify_legacy_direct(payload)
+        return
+    print("ℹ️ Hint: enable slack_tmux_bridge notify ingress or set GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1 temporarily.")
 
 def _rr_state_path():
     base_dir = os.path.dirname(ACTIVE_SESSIONS_FILE)
@@ -448,7 +527,7 @@ def main():
         metavar="MESSAGE",
         help="Post a Slack message to the removed channel",
     )
-    notify_parser = subparsers.add_parser("notify", help="Receive Codex notify payload and post to mapped Slack channel")
+    notify_parser = subparsers.add_parser("notify", help="Forward Codex notify payload to slack_tmux_bridge notify ingress")
     notify_parser.add_argument(
         "payload",
         nargs="?",

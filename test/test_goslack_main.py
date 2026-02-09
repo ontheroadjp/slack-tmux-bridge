@@ -230,7 +230,56 @@ def test_select_fallback_round_robin_state(tmp_path, monkeypatch):
     assert name == "ai-studio-01"
 
 
-def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
+def test_handle_notify_forwards_payload(monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        goslack,
+        "_forward_notify_payload",
+        lambda raw: called.update({"raw": raw}) or (True, ""),
+    )
+    monkeypatch.setattr(
+        goslack,
+        "_handle_notify_legacy_direct",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("legacy path must not run")),
+    )
+
+    payload = json.dumps({"turn-id": "turn-1", "last-assistant-message": "done"})
+    goslack.handle_notify(payload)
+    assert called["raw"] == payload
+
+
+def test_handle_notify_fallbacks_to_legacy_when_enabled(tmp_path, monkeypatch):
+    called = {}
+    monkeypatch.setattr(goslack, "_forward_notify_payload", lambda _raw: (False, "down"))
+    monkeypatch.setattr(
+        goslack,
+        "_handle_notify_legacy_direct",
+        lambda payload: called.update({"payload": payload}),
+    )
+    monkeypatch.setenv("GOSLACK_NOTIFY_LEGACY_DIRECT_POST", "1")
+
+    payload = json.dumps({"turn-id": "turn-1", "last-assistant-message": "done"})
+    goslack.handle_notify(payload)
+    assert called["payload"]["turn-id"] == "turn-1"
+
+
+def test_handle_notify_no_legacy_by_default(monkeypatch, capsys):
+    monkeypatch.delenv("GOSLACK_NOTIFY_LEGACY_DIRECT_POST", raising=False)
+    monkeypatch.setattr(goslack, "_forward_notify_payload", lambda _raw: (False, "down"))
+    monkeypatch.setattr(
+        goslack,
+        "_handle_notify_legacy_direct",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("legacy path must not run")),
+    )
+
+    payload = json.dumps({"turn-id": "turn-1", "last-assistant-message": "done"})
+    goslack.handle_notify(payload)
+    out = capsys.readouterr().out
+    assert "notify forwarding failed" in out
+    assert "GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1" in out
+
+
+def test_legacy_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
     sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
     dedupe_path = tmp_path / "tmp" / "notify_delivery_dedupe.json"
@@ -266,7 +315,7 @@ def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
             "last-assistant-message": "done",
         }
     )
-    goslack.handle_notify(payload)
+    goslack._handle_notify_legacy_direct(json.loads(payload))
 
     assert sent["channel"] == "C1"
     assert sent["text"] == "done"
@@ -275,7 +324,7 @@ def test_handle_notify_posts_to_mapped_channel(tmp_path, monkeypatch):
     assert dedupe.get("entries")
 
 
-def test_handle_notify_skips_when_duplicate_key_exists(tmp_path, monkeypatch):
+def test_legacy_handle_notify_skips_when_duplicate_key_exists(tmp_path, monkeypatch):
     sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
     dedupe_path = tmp_path / "tmp" / "notify_delivery_dedupe.json"
@@ -297,7 +346,7 @@ def test_handle_notify_skips_when_duplicate_key_exists(tmp_path, monkeypatch):
                     "pane_id": "%1",
                     "thread_ts": "123.456",
                     "turn_id": "turn-1",
-                    "source": "notify",
+                    "source": "legacy-notify",
                     "ts": time.time(),
                 }
             }
@@ -316,10 +365,10 @@ def test_handle_notify_skips_when_duplicate_key_exists(tmp_path, monkeypatch):
             "last-assistant-message": "done",
         }
     )
-    goslack.handle_notify(payload)
+    goslack._handle_notify_legacy_direct(json.loads(payload))
 
 
-def test_handle_notify_skips_when_not_mapped(tmp_path, monkeypatch):
+def test_legacy_handle_notify_skips_when_not_mapped(tmp_path, monkeypatch):
     sessions_path = tmp_path / "active_sessions.json"
     monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
     goslack.save_json(
@@ -341,10 +390,10 @@ def test_handle_notify_skips_when_not_mapped(tmp_path, monkeypatch):
             "last-assistant-message": "done",
         }
     )
-    goslack.handle_notify(payload)
+    goslack._handle_notify_legacy_direct(json.loads(payload))
 
 
-def test_handle_notify_skips_when_thread_context_missing(tmp_path, monkeypatch):
+def test_legacy_handle_notify_skips_when_thread_context_missing(tmp_path, monkeypatch):
     sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
     monkeypatch.setattr(goslack, "ACTIVE_SESSIONS_FILE", str(sessions_path))
@@ -368,4 +417,4 @@ def test_handle_notify_skips_when_thread_context_missing(tmp_path, monkeypatch):
             "last-assistant-message": "done",
         }
     )
-    goslack.handle_notify(payload)
+    goslack._handle_notify_legacy_direct(json.loads(payload))

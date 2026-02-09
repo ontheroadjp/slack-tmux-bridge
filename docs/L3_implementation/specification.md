@@ -95,7 +95,7 @@
 - `goslack.py --add <pane> --channel <NAME>`: チャンネル解決を指定名のみに固定し、フォールバックを行わない。
 - `goslack.py list` の並び順: `ai-studio-01/02/03` が先頭（番号順）、それ以外はチャンネル名の昇順。チャンネル名が無い場合は `-`。
 - `goslack.py rm <number>`: 番号が範囲外の場合はエラー終了。
-- `goslack.py notify <payload>`: Codex CLI の `notify` JSON ペイロードを受け取り、現在の tmux ペインに紐づく Slack チャンネルへ通知する。
+- `goslack.py notify <payload>`: Codex CLI の `notify` JSON ペイロードを受け取り、`slack_tmux_bridge` notify ingress へ転送する。
 
 #### 4.4.1 `list` の出力例
 
@@ -115,8 +115,9 @@ python goslack.py rm 4
 
 ### 4.5 Codex notify 連携
 - Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
-- `goslack.py notify` は JSON の `last-assistant-message` を投稿本文として Slack に投稿する。
-- 投稿先は tmux の現在 `pane_id` と `active_sessions.json` の `pane_id` の一致で解決し、同じ `pane_id` に記録された最新の Slack `thread_ts` へ返信する。
+- `goslack.py notify` は受け取った JSON を `NOTIFY_INGRESS_TRANSPORT` (`http` / `uds`) に従って `slack_tmux_bridge` notify ingress へ転送する。
+- Slack 投稿先の解決と実際の投稿は `slack_tmux_bridge` 側の責務である。
+- `GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1` を設定した場合のみ、移行互換として旧 direct-post 経路を有効化できる（非推奨）。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
 - `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。
 

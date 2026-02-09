@@ -36,14 +36,14 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
 ## Payload 契約（スレッド返信）
 - JSON object であること。
 - 必須:
-  - `channel_id`（`channel-id` から補完可）
-  - `thread_ts`（`thread-id` から補完可）
   - `last-assistant-message`
 - 補助:
+  - `channel_id`（`channel-id` から補完可）
+  - `thread_ts`（`thread-id` から補完可）
   - `pane_id`（`pane-id` から補完可）
   - `turn-id`（重複抑止イベント記録で利用）
 
-`channel_id` / `thread_ts` / `last-assistant-message` が欠落している場合、forwarding 前に reject する。
+`last-assistant-message` は forwarding 前に必須。`channel_id` / `thread_ts` は payload 直値または `pane_id` からの宛先解決（`active_sessions.json` / `tmp/notify_context.json`）で確定できる必要がある。最終的に `channel_id` / `thread_ts` を解決できない場合は reject する。
 
 ## 正規化ルール
 - 既存 snake_case を優先する（上書きしない）。
@@ -81,9 +81,11 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
 
 ## 主要エラー
 - `notify payload rejected: ...`
-  - JSON 不正 / 必須項目不足 / サイズ超過（CLI または ingress で reject）
+  - JSON 不正 / 必須項目不足 / サイズ超過 / 宛先解決不能（CLI または ingress で reject）
 - `notify forwarding failed: http 422 {"error":"destination not found"}`
-  - ingress 側で宛先解決不能（本契約では通常 `channel_id` 必須のため回避可能）
+  - ingress 側で `channel_id` を解決できない
+- `notify forwarding failed: http 422 {"error":"thread destination not found"}`
+  - ingress 側で `thread_ts` を解決できない（スレッド返信先未確定）
 - `notify forwarding failed: ...`
   - ingress 未起動、接続失敗、タイムアウトなど
 

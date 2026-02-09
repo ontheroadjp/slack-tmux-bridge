@@ -57,6 +57,7 @@
 | `NOW_WATCH_IDLE_COUNT` | `3` | `/now` の停止判定回数 | 変化が止まったとみなす閾値 |
 | `NOW_WATCH_TIMEOUT_SEC` | `180` | `/now` 監視タイムアウト | 変化が続く場合の打ち切りと継続促しのため |
 | `EXECUTE_RESULT_MODE` | `poll` | 実行ボタン押下後の結果取得方式 (`poll`/`notify`/`both`) | ポーリングと Codex notify の重複運用を制御するため |
+| `NOTIFY_DEDUPE_TTL_SEC` | `900` | poll/notify 重複排除キー保持秒数 | `both` での二重投稿を防ぐため |
 | `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---
@@ -137,7 +138,7 @@ python goslack.py rm 4
 ### 5.3 入力の種類
 - **数字のみ**: 即実行（プリクリア → 入力 → Enter）。
 - **テキスト**: 受信時に tmux へ入力を送り、ボタンを表示。
-- 「▶︎ 実行（Enter）」で Enter 送信後、`EXECUTE_RESULT_MODE` が `poll` または `both` の場合に `/now` と同じ監視に入る。
+- 「▶︎ 実行（Enter）」で Enter 送信後、`EXECUTE_RESULT_MODE` が `poll` または `both` の場合に `/now` と同じ監視に入る。`both` では notify 投稿を優先し、同一 `pane_id/thread_ts` に notify 配送が観測された場合は poll 投稿を抑止する。
   - 「👀 Geminiを見る」現在の tmux 出力を送信。
   - 「🗑️ プロンプト削除」Ctrl+U で入力行を消去。
 - **スラッシュコマンド**: `スラッシュコマンド` というメッセージによりボタンメニューを提示。
@@ -177,7 +178,7 @@ python goslack.py rm 4
 - `/now` は `NOW_WATCH_INTERVAL_SEC` 間隔で tmux 出力を監視する。
 - 連続 `NOW_WATCH_IDLE_COUNT` 回変化がなければ、`tmux capture-pane` で取得して返信する。
 - 変化が `NOW_WATCH_TIMEOUT_SEC` を超えて続く場合はタイムアウトを通知し、「監視を継続」ボタンを提示する。
-- 実行ボタンは `EXECUTE_RESULT_MODE` が `poll` または `both` の場合のみ、Enter 送信後に監視して停止タイミングでスナップショットを投稿する。
+- 実行ボタンは `EXECUTE_RESULT_MODE` が `poll` または `both` の場合のみ、Enter 送信後に監視する。`both` では notify 優先で重複排除を行い、notify が観測されない場合のみ poll スナップショットを投稿する。
 
 ### 7.2 抽出ロジック
 1. `"> prompt"` 行を探し、その行以降のみ採用。

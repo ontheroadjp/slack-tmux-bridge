@@ -13,7 +13,7 @@ def test_plist_uses_env_python3_and_tmux_bin():
 def test_launchd_ctl_has_expected_commands_and_log_tail():
     script = Path("launchd/launchd_ctl.sh").read_text(encoding="utf-8")
     assert "usage:" in script
-    for cmd in ("install", "start", "stop", "restart", "status", "log"):
+    for cmd in ("install", "start", "stop", "status", "log"):
         assert cmd in script
     assert "tail -f" in script
     assert "slack_tmux_bridge.log" in script

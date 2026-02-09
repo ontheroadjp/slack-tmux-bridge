@@ -39,6 +39,7 @@ ENTER_SCRIPT = os.path.join(BASE_DIR, "send_enter.sh")
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 PID_FILE = os.path.join(TMP_DIR, "slack_tmux_bridge.pid")
 NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
+NOTIFY_DEDUPE_FILE = os.path.join(TMP_DIR, "notify_delivery_dedupe.json")
 
 # Command filtering (comma-separated patterns; use "all" to match everything)
 COMMAND_ALLOWLIST = os.environ.get("COMMAND_ALLOWLIST", "all")
@@ -57,6 +58,7 @@ NOTIFY_UDS_MODE = int(os.environ.get("NOTIFY_UDS_MODE", "600"), 8)
 NOTIFY_MAX_PAYLOAD_BYTES = int(os.environ.get("NOTIFY_MAX_PAYLOAD_BYTES", "65536"))
 NOTIFY_RATE_LIMIT_COUNT = int(os.environ.get("NOTIFY_RATE_LIMIT_COUNT", "30"))
 NOTIFY_RATE_LIMIT_WINDOW_SEC = int(os.environ.get("NOTIFY_RATE_LIMIT_WINDOW_SEC", "60"))
+NOTIFY_DEDUPE_TTL_SEC = int(os.environ.get("NOTIFY_DEDUPE_TTL_SEC", "900"))
 
 
 # Healthcheck & cleanup
@@ -352,6 +354,16 @@ def _resolve_notify_destination(payload: dict):
         return None, None
     return ctx.get("channel_id"), ctx.get("thread_ts")
 
+def _resolve_pane_id_for_delivery(payload: dict, channel_id: str):
+    pane_id = payload.get("pane_id") if isinstance(payload, dict) else None
+    if pane_id:
+        return pane_id
+    sessions = _get_sessions()
+    value = sessions.get(channel_id)
+    if isinstance(value, dict):
+        return value.get("pane_id")
+    return None
+
 def _build_ingress_notify_text(payload: dict) -> str:
     message = payload.get("last-assistant-message")
     if isinstance(message, str):
@@ -376,6 +388,10 @@ def _accept_notify_payload(payload: dict, source: str):
 
     text = _build_ingress_notify_text(payload)
     _post_message(channel_id, text, thread_ts=thread_ts)
+    pane_id = _resolve_pane_id_for_delivery(payload, channel_id)
+    if pane_id:
+        turn_id = payload.get("turn-id") if isinstance(payload, dict) else None
+        _record_notify_delivery_event(pane_id, thread_ts, source="notify", turn_id=turn_id)
     with NOTIFY_INGRESS_LOCK:
         NOTIFY_INGRESS_STATE["accepted"] += 1
         NOTIFY_INGRESS_STATE["last_error"] = None
@@ -566,6 +582,7 @@ LAST_HEALTH_NOTIFY_TS_BY_CHANNEL = {}
 LAST_IDLE_NOTIFY_TS_BY_CHANNEL = {}
 LAST_RESTART_TS = 0.0
 PENDING_REBIND_BY_THREAD = {}
+NOTIFY_DEDUPE_LOCK = threading.Lock()
 
 def _atomic_write_json(path: str, data):
     dir_name = os.path.dirname(path)
@@ -602,6 +619,80 @@ def _load_notify_context():
             return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+def _load_notify_dedupe():
+    if not os.path.exists(NOTIFY_DEDUPE_FILE):
+        return {}
+    try:
+        with open(NOTIFY_DEDUPE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_notify_dedupe(state):
+    _atomic_write_json(NOTIFY_DEDUPE_FILE, state)
+
+def _prune_notify_dedupe(state, now_ts=None):
+    now_ts = now_ts if now_ts is not None else time.time()
+    entries = state.get("entries", {})
+    if not isinstance(entries, dict):
+        return {"entries": {}}
+    ttl = max(NOTIFY_DEDUPE_TTL_SEC, 1)
+    kept = {}
+    for key, value in entries.items():
+        if not isinstance(value, dict):
+            continue
+        ts = value.get("ts")
+        if not isinstance(ts, (int, float)):
+            continue
+        if now_ts - ts <= ttl:
+            kept[key] = value
+    return {"entries": kept}
+
+def _record_notify_delivery_event(pane_id: str, thread_ts: str, source: str, turn_id: str = None):
+    if not pane_id or not thread_ts:
+        return
+    now_ts = time.time()
+    turn_key = turn_id if turn_id else "-"
+    key = f"{pane_id}:{thread_ts}:{turn_key}:{source}"
+    with NOTIFY_DEDUPE_LOCK:
+        state = _prune_notify_dedupe(_load_notify_dedupe(), now_ts=now_ts)
+        entries = state.setdefault("entries", {})
+        entries[key] = {
+            "pane_id": pane_id,
+            "thread_ts": thread_ts,
+            "turn_id": turn_id,
+            "source": source,
+            "ts": now_ts,
+        }
+        _save_notify_dedupe(state)
+
+def _has_recent_notify_delivery(pane_id: str, thread_ts: str):
+    if not pane_id or not thread_ts:
+        return False
+    now_ts = time.time()
+    with NOTIFY_DEDUPE_LOCK:
+        state = _prune_notify_dedupe(_load_notify_dedupe(), now_ts=now_ts)
+        _save_notify_dedupe(state)
+    entries = state.get("entries", {})
+    if not isinstance(entries, dict):
+        return False
+    for value in entries.values():
+        if not isinstance(value, dict):
+            continue
+        if value.get("source") != "notify":
+            continue
+        if value.get("pane_id") == pane_id and value.get("thread_ts") == thread_ts:
+            return True
+    return False
+
+def _get_session_pane_id(channel_id: str):
+    sessions = _get_sessions()
+    value = sessions.get(channel_id)
+    if isinstance(value, dict):
+        return value.get("pane_id")
+    return None
 
 def _save_notify_context(context):
     _atomic_write_json(NOTIFY_CONTEXT_FILE, context)
@@ -770,7 +861,7 @@ def _watch_execute_output(thread_ts: str, channel_id: str, tmux_target: str):
     if not thread_ts or not channel_id or not tmux_target:
         return
     if NOW_WATCH_INTERVAL_SEC <= 0 or NOW_WATCH_IDLE_COUNT <= 0 or NOW_WATCH_TIMEOUT_SEC <= 0:
-        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
+        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "", reason="execute")
         return
 
     start_ts = time.time()
@@ -816,7 +907,7 @@ def _watch_execute_output(thread_ts: str, channel_id: str, tmux_target: str):
 
         idle_count += 1
         if idle_count >= NOW_WATCH_IDLE_COUNT:
-            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
+            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "", reason="execute")
             return
 
 def _start_execute_watch(thread_ts: str, channel_id: str, tmux_target: str):
@@ -958,7 +1049,7 @@ def _event_health_worker():
 # =====================
 # Single-capture reply (no monitoring)
 # =====================
-def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt=""):
+def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt="", reason="generic"):
     log(f"Capturing output for {thread_ts} (Target: {tmux_target}, Prompt: {prompt})...")
     time.sleep(1.0)
 
@@ -997,6 +1088,12 @@ def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt=""):
     if not msg_text:
         msg_text = "(No output detected)"
 
+    pane_id = _get_session_pane_id(channel_id)
+    if reason == "execute" and EXECUTE_RESULT_MODE == "both" and _has_recent_notify_delivery(pane_id, thread_ts):
+        log(f"dedupe: skip poll snapshot due to recent notify pane_id={pane_id} thread_ts={thread_ts}")
+        _cleanup_prompt_cache(thread_ts)
+        return
+
     # 長文対策: 3000文字を超える場合は分割して送信
     chunk_size = 3000
     if len(msg_text) <= chunk_size:
@@ -1025,6 +1122,8 @@ def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt=""):
                 thread_ts=thread_ts
             )
 
+    if pane_id:
+        _record_notify_delivery_event(pane_id, thread_ts, source="poll")
     _cleanup_prompt_cache(thread_ts)
 
 # =====================

@@ -5,6 +5,7 @@ import argparse
 import json
 import subprocess
 import tempfile
+import time
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 
@@ -15,12 +16,14 @@ ACTIVE_SESSIONS_FILE = os.path.join(BASE_DIR, "active_sessions.json")
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
+NOTIFY_DEDUPE_FILE = os.path.join(TMP_DIR, "notify_delivery_dedupe.json")
 AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 
 # Load environment variables
 load_dotenv(DOTENV_PATH)
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
+NOTIFY_DEDUPE_TTL_SEC = int(os.environ.get("NOTIFY_DEDUPE_TTL_SEC", "900"))
 
 def load_json(path):
     if not os.path.exists(path):
@@ -110,8 +113,10 @@ def send_slack_message(channel, text, thread_ts=None):
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
         client.chat_postMessage(**kwargs)
+        return True
     except Exception as e:
         print(f"⚠️ Warning: Failed to send Slack message: {e}")
+        return False
 
 def _find_channel_by_name(client, name):
     cursor = None
@@ -236,6 +241,61 @@ def _find_channel_id_by_pane_id(active_sessions, pane_id):
             return channel_id
     return None
 
+def _load_notify_dedupe():
+    data = load_json(NOTIFY_DEDUPE_FILE)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+def _save_notify_dedupe(state):
+    save_json(NOTIFY_DEDUPE_FILE, state)
+
+def _prune_notify_dedupe(state, now_ts=None):
+    now_ts = now_ts if now_ts is not None else time.time()
+    ttl = max(NOTIFY_DEDUPE_TTL_SEC, 1)
+    entries = state.get("entries", {})
+    if not isinstance(entries, dict):
+        return {"entries": {}}
+    kept = {}
+    for key, value in entries.items():
+        if not isinstance(value, dict):
+            continue
+        ts = value.get("ts")
+        if not isinstance(ts, (int, float)):
+            continue
+        if now_ts - ts <= ttl:
+            kept[key] = value
+    return {"entries": kept}
+
+def _build_delivery_key(pane_id: str, thread_ts: str, turn_id: str):
+    return f"{pane_id}:{thread_ts}:{turn_id if turn_id else '-'}"
+
+def _seen_delivery_event(pane_id: str, thread_ts: str, turn_id: str):
+    if not pane_id or not thread_ts:
+        return False
+    state = _prune_notify_dedupe(_load_notify_dedupe())
+    entries = state.get("entries", {})
+    if not isinstance(entries, dict):
+        return False
+    key = _build_delivery_key(pane_id, thread_ts, turn_id)
+    return key in entries
+
+def _record_delivery_event(pane_id: str, thread_ts: str, turn_id: str, source: str):
+    if not pane_id or not thread_ts:
+        return
+    now_ts = time.time()
+    state = _prune_notify_dedupe(_load_notify_dedupe(), now_ts=now_ts)
+    entries = state.setdefault("entries", {})
+    key = _build_delivery_key(pane_id, thread_ts, turn_id)
+    entries[key] = {
+        "pane_id": pane_id,
+        "thread_ts": thread_ts,
+        "turn_id": turn_id,
+        "source": source,
+        "ts": now_ts,
+    }
+    _save_notify_dedupe(state)
+
 def _parse_notify_payload(raw_payload):
     if not raw_payload:
         return None
@@ -292,8 +352,14 @@ def handle_notify(payload_arg):
         print(f"⚠️ Warning: No thread_ts context found for pane {pane_id}.")
         return
 
+    turn_id = payload.get("turn-id")
+    if _seen_delivery_event(pane_id, thread_ts, turn_id):
+        print(f"ℹ️ Skip duplicate notify delivery for pane={pane_id} thread_ts={thread_ts} turn_id={turn_id}")
+        return
+
     message = _build_codex_notify_message(payload)
-    send_slack_message(channel_id, message, thread_ts=thread_ts)
+    if send_slack_message(channel_id, message, thread_ts=thread_ts):
+        _record_delivery_event(pane_id, thread_ts, turn_id, source="notify")
 
 def _rr_state_path():
     base_dir = os.path.dirname(ACTIVE_SESSIONS_FILE)

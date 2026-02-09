@@ -111,3 +111,33 @@ def test_capture_chunks_long_output(monkeypatch):
 
     assert len(messages) == 3
     assert all(msg.startswith("```") for msg in messages)
+
+
+def test_event_health_worker_triggers_restart(monkeypatch):
+    monkeypatch.setattr(stb, "EVENT_HEALTH_TIMEOUT", 1)
+    monkeypatch.setattr(stb, "EVENT_HEALTH_ACTION", "restart")
+    monkeypatch.setattr(stb, "EVENT_HEALTH_RESTART_COOLDOWN_SEC", 0)
+    monkeypatch.setattr(stb, "EVENT_HEALTH_NOTIFY", False)
+    monkeypatch.setattr(stb, "CHANNEL_IDLE_NOTIFY_SEC", 0)
+    monkeypatch.setattr(stb, "LAST_EVENT_TS", 0.0)
+    monkeypatch.setattr(stb, "LAST_RESTART_TS", 0.0)
+    monkeypatch.setattr(stb.time, "sleep", lambda _sec: None)
+
+    called = {}
+
+    def _execv(executable, argv):
+        called["executable"] = executable
+        called["argv"] = argv
+        raise RuntimeError("stop_worker")
+
+    monkeypatch.setattr(stb.os, "execv", _execv)
+
+    try:
+        stb._event_health_worker()
+    except RuntimeError as exc:
+        assert str(exc) == "stop_worker"
+    else:
+        raise AssertionError("worker did not trigger restart")
+
+    assert called["executable"] == stb.sys.executable
+    assert called["argv"] == [stb.sys.executable] + stb.sys.argv

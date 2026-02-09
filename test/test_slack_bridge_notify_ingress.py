@@ -194,3 +194,58 @@ def test_process_notify_queue_drops_ttl(tmp_path, monkeypatch):
     state = stb._load_notify_queue()
     assert state["items"] == []
     assert stb.NOTIFY_DELIVERY_STATE["dropped_ttl"] >= 1
+
+
+def test_notify_ingress_accept_then_delivery_posts_to_slack(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_COUNT", 30)
+    monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_WINDOW_SEC", 60)
+    monkeypatch.setattr(stb, "NOTIFY_RETRY_MAX_ATTEMPTS", 3)
+
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
+
+    accepted, reason = stb._accept_notify_payload(
+        {
+            "channel_id": "C1",
+            "thread_ts": "123.456",
+            "turn-id": "turn-1",
+            "last-assistant-message": "notify message",
+        },
+        source="http",
+    )
+    assert accepted is True
+    assert reason == ""
+
+    posted = {}
+    monkeypatch.setattr(
+        stb,
+        "_post_message_with_result",
+        lambda channel_id, text, thread_ts=None, blocks=None: posted.update(
+            {"channel_id": channel_id, "text": text, "thread_ts": thread_ts}
+        ) or (True, ""),
+    )
+
+    dedupe = {}
+    monkeypatch.setattr(
+        stb,
+        "_record_notify_delivery_event",
+        lambda pane_id, thread_ts, source="notify", turn_id="": dedupe.update(
+            {"pane_id": pane_id, "thread_ts": thread_ts, "source": source, "turn_id": turn_id}
+        ),
+    )
+
+    stb._process_notify_queue_once(now_ts=time.time())
+    state = stb._load_notify_queue()
+    assert state["items"] == []
+    assert posted["channel_id"] == "C1"
+    assert posted["thread_ts"] == "123.456"
+    assert posted["text"] == "notify message"
+    assert dedupe["pane_id"] == "%1"
+    assert dedupe["thread_ts"] == "123.456"

@@ -8,7 +8,11 @@ import json
 import logging
 import atexit
 import tempfile
+import socket
+import socketserver
+import http.server
 from datetime import datetime
+from collections import deque
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -39,6 +43,20 @@ NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
 # Command filtering (comma-separated patterns; use "all" to match everything)
 COMMAND_ALLOWLIST = os.environ.get("COMMAND_ALLOWLIST", "all")
 COMMAND_DENYLIST = os.environ.get("COMMAND_DENYLIST", "")
+
+# Notify ingress (Issue #7 scope: localhost HTTP or Unix Domain Socket)
+NOTIFY_INGRESS_ENABLED = os.environ.get("NOTIFY_INGRESS_ENABLED", "0") == "1"
+NOTIFY_INGRESS_TRANSPORT = os.environ.get("NOTIFY_INGRESS_TRANSPORT", "http").lower()  # http | uds
+if NOTIFY_INGRESS_TRANSPORT not in {"http", "uds"}:
+    NOTIFY_INGRESS_TRANSPORT = "http"
+NOTIFY_HTTP_HOST = os.environ.get("NOTIFY_HTTP_HOST", "127.0.0.1")
+NOTIFY_HTTP_PORT = int(os.environ.get("NOTIFY_HTTP_PORT", "8765"))
+NOTIFY_HTTP_PATH = os.environ.get("NOTIFY_HTTP_PATH", "/notify")
+NOTIFY_UDS_PATH = os.environ.get("NOTIFY_UDS_PATH", os.path.join(TMP_DIR, "notify_ingress.sock"))
+NOTIFY_UDS_MODE = int(os.environ.get("NOTIFY_UDS_MODE", "600"), 8)
+NOTIFY_MAX_PAYLOAD_BYTES = int(os.environ.get("NOTIFY_MAX_PAYLOAD_BYTES", "65536"))
+NOTIFY_RATE_LIMIT_COUNT = int(os.environ.get("NOTIFY_RATE_LIMIT_COUNT", "30"))
+NOTIFY_RATE_LIMIT_WINDOW_SEC = int(os.environ.get("NOTIFY_RATE_LIMIT_WINDOW_SEC", "60"))
 
 
 # Healthcheck & cleanup
@@ -96,6 +114,15 @@ def ensure_required_tokens():
     global SLACK_BOT_TOKEN, SLACK_APP_TOKEN
     SLACK_BOT_TOKEN = _require_env("SLACK_BOT_TOKEN")
     SLACK_APP_TOKEN = _require_env("SLACK_APP_TOKEN")
+
+def _is_loopback_host(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        addr = socket.gethostbyname(value)
+    except Exception:
+        return False
+    return addr.startswith("127.") or addr == "::1"
 
 def ensure_single_instance():
     # Guard against manual double-start even if PID file is missing.
@@ -269,6 +296,190 @@ def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None
         app.client.chat_postMessage(**kwargs)
     except Exception as e:
         log(f"⚠️ Slack post failed: {e}")
+
+# =====================
+# Notify ingress helpers
+# =====================
+NOTIFY_INGRESS_STATE = {
+    "accepted": 0,
+    "rejected": 0,
+    "last_error": None,
+}
+NOTIFY_INGRESS_EVENTS = deque()
+NOTIFY_INGRESS_LOCK = threading.Lock()
+NOTIFY_INGRESS_SERVERS = []
+
+def _notify_rate_limited(now=None) -> bool:
+    if NOTIFY_RATE_LIMIT_COUNT <= 0 or NOTIFY_RATE_LIMIT_WINDOW_SEC <= 0:
+        return False
+    now_ts = now if now is not None else time.time()
+    with NOTIFY_INGRESS_LOCK:
+        while NOTIFY_INGRESS_EVENTS and now_ts - NOTIFY_INGRESS_EVENTS[0] > NOTIFY_RATE_LIMIT_WINDOW_SEC:
+            NOTIFY_INGRESS_EVENTS.popleft()
+        if len(NOTIFY_INGRESS_EVENTS) >= NOTIFY_RATE_LIMIT_COUNT:
+            return True
+        NOTIFY_INGRESS_EVENTS.append(now_ts)
+        return False
+
+def _validate_notify_payload_bytes(raw_payload: bytes):
+    if not isinstance(raw_payload, (bytes, bytearray)):
+        return False, "payload is not bytes", None
+    if len(raw_payload) == 0:
+        return False, "payload is empty", None
+    if len(raw_payload) > NOTIFY_MAX_PAYLOAD_BYTES:
+        return False, "payload too large", None
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except Exception:
+        return False, "invalid json", None
+    if not isinstance(payload, dict):
+        return False, "payload must be object", None
+    return True, "", payload
+
+def _resolve_notify_destination(payload: dict):
+    if not isinstance(payload, dict):
+        return None, None
+    channel_id = payload.get("channel_id")
+    thread_ts = payload.get("thread_ts")
+    if channel_id and thread_ts:
+        return channel_id, thread_ts
+    pane_id = payload.get("pane_id")
+    if not pane_id:
+        return None, None
+    context = _load_notify_context()
+    ctx = context.get(pane_id) if isinstance(context, dict) else None
+    if not isinstance(ctx, dict):
+        return None, None
+    return ctx.get("channel_id"), ctx.get("thread_ts")
+
+def _build_ingress_notify_text(payload: dict) -> str:
+    message = payload.get("last-assistant-message")
+    if isinstance(message, str):
+        text = message.strip()
+        if text:
+            return text
+    return "(empty notify message)"
+
+def _accept_notify_payload(payload: dict, source: str):
+    if _notify_rate_limited():
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "rate limited"
+        return False, "rate limited"
+
+    channel_id, thread_ts = _resolve_notify_destination(payload)
+    if not channel_id or not thread_ts:
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "destination not found"
+        return False, "destination not found"
+
+    text = _build_ingress_notify_text(payload)
+    _post_message(channel_id, text, thread_ts=thread_ts)
+    with NOTIFY_INGRESS_LOCK:
+        NOTIFY_INGRESS_STATE["accepted"] += 1
+        NOTIFY_INGRESS_STATE["last_error"] = None
+    log(f"notify ingress accepted source={source} channel={channel_id}")
+    return True, ""
+
+class _NotifyHttpHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "SlackTmuxNotifyHTTP/1.0"
+
+    def _json_response(self, status: int, body: dict):
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        if self.path != NOTIFY_HTTP_PATH:
+            self._json_response(404, {"ok": False, "error": "not found"})
+            return
+        client_ip = (self.client_address[0] if self.client_address else "") or ""
+        if not (client_ip.startswith("127.") or client_ip == "::1"):
+            self._json_response(403, {"ok": False, "error": "forbidden"})
+            return
+        content_length = self.headers.get("Content-Length")
+        if not content_length:
+            self._json_response(400, {"ok": False, "error": "missing content length"})
+            return
+        try:
+            size = int(content_length)
+        except ValueError:
+            self._json_response(400, {"ok": False, "error": "invalid content length"})
+            return
+        if size <= 0:
+            self._json_response(400, {"ok": False, "error": "empty payload"})
+            return
+        if size > NOTIFY_MAX_PAYLOAD_BYTES:
+            self._json_response(413, {"ok": False, "error": "payload too large"})
+            return
+
+        raw_payload = self.rfile.read(size)
+        ok, error, payload = _validate_notify_payload_bytes(raw_payload)
+        if not ok:
+            self._json_response(400, {"ok": False, "error": error})
+            return
+        accepted, reason = _accept_notify_payload(payload, source="http")
+        if not accepted:
+            status = 429 if reason == "rate limited" else 422
+            self._json_response(status, {"ok": False, "error": reason})
+            return
+        self._json_response(200, {"ok": True})
+
+    def log_message(self, format, *args):
+        return
+
+class _NotifyUnixSocketServer(socketserver.UnixStreamServer):
+    allow_reuse_address = True
+
+class _NotifyUnixSocketHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        raw_payload = self.rfile.readline(NOTIFY_MAX_PAYLOAD_BYTES + 2)
+        if not raw_payload:
+            self.wfile.write(b'{"ok":false,"error":"empty payload"}\n')
+            return
+        if len(raw_payload) > NOTIFY_MAX_PAYLOAD_BYTES:
+            self.wfile.write(b'{"ok":false,"error":"payload too large"}\n')
+            return
+        ok, error, payload = _validate_notify_payload_bytes(raw_payload.strip())
+        if not ok:
+            self.wfile.write(json.dumps({"ok": False, "error": error}).encode("utf-8") + b"\n")
+            return
+        accepted, reason = _accept_notify_payload(payload, source="uds")
+        if not accepted:
+            self.wfile.write(json.dumps({"ok": False, "error": reason}).encode("utf-8") + b"\n")
+            return
+        self.wfile.write(b'{"ok":true}\n')
+
+def start_notify_ingress():
+    if not NOTIFY_INGRESS_ENABLED:
+        log("notify ingress disabled")
+        return
+    if NOTIFY_INGRESS_TRANSPORT == "http":
+        if not _is_loopback_host(NOTIFY_HTTP_HOST):
+            log(f"Invalid NOTIFY_HTTP_HOST for localhost-only mode: {NOTIFY_HTTP_HOST}")
+            sys.exit(1)
+        server = http.server.ThreadingHTTPServer((NOTIFY_HTTP_HOST, NOTIFY_HTTP_PORT), _NotifyHttpHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        NOTIFY_INGRESS_SERVERS.append(server)
+        log(f"notify ingress listening http://{NOTIFY_HTTP_HOST}:{NOTIFY_HTTP_PORT}{NOTIFY_HTTP_PATH}")
+        return
+
+    uds_dir = os.path.dirname(NOTIFY_UDS_PATH)
+    if uds_dir and not os.path.exists(uds_dir):
+        os.makedirs(uds_dir)
+    if os.path.exists(NOTIFY_UDS_PATH):
+        os.remove(NOTIFY_UDS_PATH)
+    server = _NotifyUnixSocketServer(NOTIFY_UDS_PATH, _NotifyUnixSocketHandler)
+    os.chmod(NOTIFY_UDS_PATH, NOTIFY_UDS_MODE)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    NOTIFY_INGRESS_SERVERS.append(server)
+    log(f"notify ingress listening uds://{NOTIFY_UDS_PATH}")
 
 # =====================
 # Slack: inbound logging
@@ -1495,6 +1706,19 @@ def handle_cancel_rebind(ack, body):
 def post_startup_message():
     log("Bot started. Waiting for connections in active_sessions.json")
 
+def stop_notify_ingress():
+    for server in NOTIFY_INGRESS_SERVERS:
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+    if NOTIFY_INGRESS_TRANSPORT == "uds" and os.path.exists(NOTIFY_UDS_PATH):
+        try:
+            os.remove(NOTIFY_UDS_PATH)
+        except Exception:
+            pass
+
 # =====================
 # main
 # =====================
@@ -1507,9 +1731,11 @@ if __name__ == "__main__":
         os.makedirs(TMP_DIR)
 
     ensure_single_instance()
+    atexit.register(stop_notify_ingress)
 
     threading.Thread(target=_maintenance_worker, daemon=True).start()
     threading.Thread(target=_event_health_worker, daemon=True).start()
+    start_notify_ingress()
     
     # active_sessions.json がなければ作成
     if not os.path.exists(ACTIVE_SESSIONS_FILE):

@@ -290,3 +290,38 @@ def test_run_notify_cli_rejects_invalid_payload(capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "notify payload rejected" in out
+
+
+def test_run_notify_cli_normalizes_thread_id(monkeypatch):
+    captured = {}
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+    monkeypatch.setattr(
+        stb,
+        "_forward_notify_payload",
+        _forward,
+    )
+    rc = stb.run_notify_cli('{"thread-id":"123.456","last-assistant-message":"done"}')
+    assert rc == 0
+    forwarded = captured["payload"]
+    payload = stb.json.loads(forwarded)
+    assert payload["thread_ts"] == "123.456"
+    assert payload["thread-id"] == "123.456"
+
+
+def test_run_notify_cli_keeps_existing_thread_ts(monkeypatch):
+    captured = {}
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+    monkeypatch.setattr(
+        stb,
+        "_forward_notify_payload",
+        _forward,
+    )
+    rc = stb.run_notify_cli('{"thread-id":"123.456","thread_ts":"999.000","last-assistant-message":"done"}')
+    assert rc == 0
+    forwarded = captured["payload"]
+    payload = stb.json.loads(forwarded)
+    assert payload["thread_ts"] == "999.000"

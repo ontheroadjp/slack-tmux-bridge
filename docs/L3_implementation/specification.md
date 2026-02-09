@@ -109,7 +109,7 @@ python goslack.py rm 4
 
 ### 4.5 Codex notify 連携
 - Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
-- `goslack.py notify` は JSON から `thread-id`, `turn-id`, `last-assistant-message` を取り出して整形し、Slack に投稿する。
+- `goslack.py notify` は JSON の `last-assistant-message` を投稿本文として Slack に投稿する。
 - 投稿先は tmux の現在 `pane_id` と `active_sessions.json` の `pane_id` の一致で解決し、同じ `pane_id` に記録された最新の Slack `thread_ts` へ返信する。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
 

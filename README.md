@@ -243,7 +243,6 @@ python slack_tmux_bridge.py
 - `/now`: Slack command that waits until pane output stabilizes, then posts the capture (timeout offers a continue button).
 - `/ctlc`: Slack command that sends Ctrl+C to the connected tmux pane.
 - `goslack.py`: Registers the current tmux pane with the target channel, cleans up duplicates, and supports `list`/`rm` (numbered), `--add`, and optional `--channel` override for session maintenance.
-  - `goslack.py notify`: receives Codex CLI `notify` JSON payload and forwards it to `slack_tmux_bridge` notify ingress.
 
 ## Tips
 
@@ -291,13 +290,13 @@ codex() {
 
 ### Codex CLI notify -> Slack
 
-Codex CLI can run an external program when a turn completes. Configure it to call `goslack.py notify`; the bridge polling (`/now`) remains unchanged.
+Codex CLI can run an external program when a turn completes. Configure it to call `slack_tmux_bridge.py notify`; the bridge polling (`/now`) remains unchanged.
 
 `~/.codex/config.toml`:
 
 ```toml
 [notify]
-command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/goslack.py", "notify"]
+command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py", "notify"]
 ```
 
 Codex passes one JSON argument to `notify` with keys like:
@@ -306,8 +305,7 @@ Codex passes one JSON argument to `notify` with keys like:
 - `input-messages`
 - `last-assistant-message`
 
-`goslack.py notify` forwards the raw notify payload to `slack_tmux_bridge` ingress using `NOTIFY_INGRESS_TRANSPORT` (`http` or `uds`). The bridge is responsible for destination resolution and final Slack posting.
-If forwarding fails and you need temporary backward compatibility, set `GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1` to re-enable the deprecated direct-post path.
+`slack_tmux_bridge.py notify` forwards the raw notify payload to `slack_tmux_bridge` ingress using `NOTIFY_INGRESS_TRANSPORT` (`http` or `uds`). The bridge is responsible for destination resolution and final Slack posting.
 
 ### Notify ingress on slack_tmux_bridge
 
@@ -316,7 +314,7 @@ You can enable a local notify receiver on the bridge itself:
 - `NOTIFY_INGRESS_ENABLED=1`
 - `NOTIFY_INGRESS_TRANSPORT=http` with `NOTIFY_HTTP_HOST=127.0.0.1` (localhost-only) and `NOTIFY_HTTP_PORT` / `NOTIFY_HTTP_PATH`
 - or `NOTIFY_INGRESS_TRANSPORT=uds` with `NOTIFY_UDS_PATH` / `NOTIFY_UDS_MODE`
-- `NOTIFY_FORWARD_TIMEOUT_SEC` controls timeout (seconds) for `goslack.py notify` forwarding requests
+- `NOTIFY_FORWARD_TIMEOUT_SEC` controls timeout (seconds) for `slack_tmux_bridge.py notify` forwarding requests
 
 Security controls:
 

@@ -40,6 +40,7 @@ TMP_DIR = os.path.join(BASE_DIR, "tmp")
 PID_FILE = os.path.join(TMP_DIR, "slack_tmux_bridge.pid")
 NOTIFY_CONTEXT_FILE = os.path.join(TMP_DIR, "notify_context.json")
 NOTIFY_DEDUPE_FILE = os.path.join(TMP_DIR, "notify_delivery_dedupe.json")
+NOTIFY_QUEUE_FILE = os.path.join(TMP_DIR, "notify_delivery_queue.json")
 
 # Command filtering (comma-separated patterns; use "all" to match everything)
 COMMAND_ALLOWLIST = os.environ.get("COMMAND_ALLOWLIST", "all")
@@ -59,6 +60,11 @@ NOTIFY_MAX_PAYLOAD_BYTES = int(os.environ.get("NOTIFY_MAX_PAYLOAD_BYTES", "65536
 NOTIFY_RATE_LIMIT_COUNT = int(os.environ.get("NOTIFY_RATE_LIMIT_COUNT", "30"))
 NOTIFY_RATE_LIMIT_WINDOW_SEC = int(os.environ.get("NOTIFY_RATE_LIMIT_WINDOW_SEC", "60"))
 NOTIFY_DEDUPE_TTL_SEC = int(os.environ.get("NOTIFY_DEDUPE_TTL_SEC", "900"))
+NOTIFY_QUEUE_TTL_SEC = int(os.environ.get("NOTIFY_QUEUE_TTL_SEC", "3600"))
+NOTIFY_RETRY_BASE_SEC = float(os.environ.get("NOTIFY_RETRY_BASE_SEC", "2"))
+NOTIFY_RETRY_MAX_SEC = float(os.environ.get("NOTIFY_RETRY_MAX_SEC", "60"))
+NOTIFY_RETRY_MAX_ATTEMPTS = int(os.environ.get("NOTIFY_RETRY_MAX_ATTEMPTS", "10"))
+NOTIFY_RETRY_TICK_SEC = float(os.environ.get("NOTIFY_RETRY_TICK_SEC", "1"))
 
 
 # Healthcheck & cleanup
@@ -289,6 +295,11 @@ logger = logging.getLogger("slack_tmux_bridge")
 app = App(token=SLACK_BOT_TOKEN, logger=logger)
 
 def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None):
+    ok, error = _post_message_with_result(channel_id, text, thread_ts=thread_ts, blocks=blocks)
+    if not ok:
+        log(f"⚠️ Slack post failed: {error}")
+
+def _post_message_with_result(channel_id: str, text: str, thread_ts: str = None, blocks=None):
     try:
         kwargs = {"channel": channel_id, "text": text}
         if thread_ts:
@@ -296,8 +307,136 @@ def _post_message(channel_id: str, text: str, thread_ts: str = None, blocks=None
         if blocks:
             kwargs["blocks"] = blocks
         app.client.chat_postMessage(**kwargs)
+        return True, ""
     except Exception as e:
-        log(f"⚠️ Slack post failed: {e}")
+        return False, str(e)
+
+def _load_notify_queue():
+    if not os.path.exists(NOTIFY_QUEUE_FILE):
+        return {"items": []}
+    try:
+        with open(NOTIFY_QUEUE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                return data
+            return {"items": []}
+    except Exception:
+        return {"items": []}
+
+def _save_notify_queue(state):
+    if not isinstance(state, dict):
+        state = {"items": []}
+    items = state.get("items")
+    if not isinstance(items, list):
+        state = {"items": []}
+    _atomic_write_json(NOTIFY_QUEUE_FILE, state)
+
+def _calc_retry_delay(attempt: int) -> float:
+    base = NOTIFY_RETRY_BASE_SEC if NOTIFY_RETRY_BASE_SEC > 0 else 1.0
+    max_delay = NOTIFY_RETRY_MAX_SEC if NOTIFY_RETRY_MAX_SEC > 0 else base
+    delay = base * (2 ** max(attempt - 1, 0))
+    return min(delay, max_delay)
+
+def _enqueue_notify_message(item: dict):
+    now_ts = time.time()
+    with NOTIFY_QUEUE_LOCK:
+        state = _load_notify_queue()
+        items = state.setdefault("items", [])
+        items.append(item)
+        _save_notify_queue(state)
+        NOTIFY_DELIVERY_STATE["enqueued"] += 1
+        NOTIFY_DELIVERY_STATE["last_error"] = None
+    log(
+        "notify queued"
+        f" channel={item.get('channel_id')} thread_ts={item.get('thread_ts')}"
+        f" source={item.get('source')} size={len(items)}"
+    )
+
+def _drop_notify_item(reason: str, item: dict):
+    NOTIFY_DELIVERY_STATE["failed"] += 1
+    NOTIFY_DELIVERY_STATE["last_error"] = reason
+    if reason == "ttl":
+        NOTIFY_DELIVERY_STATE["dropped_ttl"] += 1
+    if reason == "max_attempts":
+        NOTIFY_DELIVERY_STATE["dropped_max_attempts"] += 1
+    log(
+        "notify dropped"
+        f" reason={reason} channel={item.get('channel_id')}"
+        f" thread_ts={item.get('thread_ts')} attempts={item.get('attempts')}"
+    )
+
+def _process_notify_queue_once(now_ts=None):
+    now_ts = now_ts if now_ts is not None else time.time()
+    with NOTIFY_QUEUE_LOCK:
+        state = _load_notify_queue()
+        items = state.get("items", [])
+        if not isinstance(items, list):
+            state = {"items": []}
+            _save_notify_queue(state)
+            return
+
+        kept = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            created_at = item.get("created_at")
+            if not isinstance(created_at, (int, float)):
+                _drop_notify_item("invalid_created_at", item)
+                continue
+            if now_ts - created_at > max(NOTIFY_QUEUE_TTL_SEC, 1):
+                _drop_notify_item("ttl", item)
+                continue
+
+            next_attempt_at = item.get("next_attempt_at", created_at)
+            if isinstance(next_attempt_at, (int, float)) and next_attempt_at > now_ts:
+                kept.append(item)
+                continue
+
+            channel_id = item.get("channel_id")
+            thread_ts = item.get("thread_ts")
+            text = item.get("text")
+            pane_id = item.get("pane_id")
+            turn_id = item.get("turn_id")
+            attempts = int(item.get("attempts", 0))
+
+            ok, error = _post_message_with_result(channel_id, text, thread_ts=thread_ts)
+            if ok:
+                NOTIFY_DELIVERY_STATE["sent"] += 1
+                NOTIFY_DELIVERY_STATE["last_error"] = None
+                if pane_id:
+                    _record_notify_delivery_event(pane_id, thread_ts, source="notify", turn_id=turn_id)
+                continue
+
+            attempts += 1
+            item["attempts"] = attempts
+            item["last_error"] = error
+            item["last_attempt_at"] = now_ts
+            NOTIFY_DELIVERY_STATE["last_error"] = error
+            if NOTIFY_RETRY_MAX_ATTEMPTS > 0 and attempts >= NOTIFY_RETRY_MAX_ATTEMPTS:
+                _drop_notify_item("max_attempts", item)
+                continue
+            delay = _calc_retry_delay(attempts)
+            item["next_attempt_at"] = now_ts + delay
+            kept.append(item)
+            log(
+                "notify delivery retry scheduled"
+                f" attempts={attempts} delay={delay}s"
+                f" channel={channel_id} thread_ts={thread_ts} error={error}"
+            )
+
+        state["items"] = kept
+        _save_notify_queue(state)
+
+def _notify_delivery_worker():
+    # Startup replay: process persisted queue as soon as worker starts.
+    while True:
+        try:
+            _process_notify_queue_once()
+        except Exception as e:
+            NOTIFY_DELIVERY_STATE["last_error"] = str(e)
+            log(f"notify delivery worker error: {e}")
+        sleep_sec = NOTIFY_RETRY_TICK_SEC if NOTIFY_RETRY_TICK_SEC > 0 else 1.0
+        time.sleep(sleep_sec)
 
 # =====================
 # Notify ingress helpers
@@ -307,9 +446,18 @@ NOTIFY_INGRESS_STATE = {
     "rejected": 0,
     "last_error": None,
 }
+NOTIFY_DELIVERY_STATE = {
+    "enqueued": 0,
+    "sent": 0,
+    "failed": 0,
+    "dropped_ttl": 0,
+    "dropped_max_attempts": 0,
+    "last_error": None,
+}
 NOTIFY_INGRESS_EVENTS = deque()
 NOTIFY_INGRESS_LOCK = threading.Lock()
 NOTIFY_INGRESS_SERVERS = []
+NOTIFY_QUEUE_LOCK = threading.Lock()
 
 def _notify_rate_limited(now=None) -> bool:
     if NOTIFY_RATE_LIMIT_COUNT <= 0 or NOTIFY_RATE_LIMIT_WINDOW_SEC <= 0:
@@ -386,16 +534,27 @@ def _accept_notify_payload(payload: dict, source: str):
             NOTIFY_INGRESS_STATE["last_error"] = "destination not found"
         return False, "destination not found"
 
-    text = _build_ingress_notify_text(payload)
-    _post_message(channel_id, text, thread_ts=thread_ts)
     pane_id = _resolve_pane_id_for_delivery(payload, channel_id)
-    if pane_id:
-        turn_id = payload.get("turn-id") if isinstance(payload, dict) else None
-        _record_notify_delivery_event(pane_id, thread_ts, source="notify", turn_id=turn_id)
+    turn_id = payload.get("turn-id") if isinstance(payload, dict) else None
+    text = _build_ingress_notify_text(payload)
+    _enqueue_notify_message(
+        {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "pane_id": pane_id,
+            "turn_id": turn_id,
+            "text": text,
+            "source": source,
+            "created_at": time.time(),
+            "next_attempt_at": time.time(),
+            "attempts": 0,
+            "last_error": "",
+        }
+    )
     with NOTIFY_INGRESS_LOCK:
         NOTIFY_INGRESS_STATE["accepted"] += 1
         NOTIFY_INGRESS_STATE["last_error"] = None
-    log(f"notify ingress accepted source={source} channel={channel_id}")
+    log(f"notify ingress accepted source={source} channel={channel_id} (queued)")
     return True, ""
 
 class _NotifyHttpHandler(http.server.BaseHTTPRequestHandler):
@@ -1834,10 +1993,13 @@ if __name__ == "__main__":
 
     threading.Thread(target=_maintenance_worker, daemon=True).start()
     threading.Thread(target=_event_health_worker, daemon=True).start()
+    threading.Thread(target=_notify_delivery_worker, daemon=True).start()
     start_notify_ingress()
     
     # active_sessions.json がなければ作成
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         _atomic_write_json(ACTIVE_SESSIONS_FILE, {})
+    if not os.path.exists(NOTIFY_QUEUE_FILE):
+        _atomic_write_json(NOTIFY_QUEUE_FILE, {"items": []})
 
     SocketModeHandler(app, SLACK_APP_TOKEN).start()

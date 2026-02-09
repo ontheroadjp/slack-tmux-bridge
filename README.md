@@ -73,6 +73,7 @@ cp .env.sample .env
 - `EXECUTE_RESULT_MODE` – behavior after pressing “Execute (Enter)”: `poll` (watch output and post snapshot), `notify` (notify-only), `both` (notify-first with poll fallback; dedupe enabled).
 - `NOTIFY_INGRESS_*` – optional local notify ingress for `slack_tmux_bridge` (`http` localhost-only or `uds`), including payload size and rate-limit settings.
 - `NOTIFY_DEDUPE_TTL_SEC` – retention window for dedupe keys used by `poll/notify` coordination.
+- `NOTIFY_QUEUE_TTL_SEC` / `NOTIFY_RETRY_BASE_SEC` / `NOTIFY_RETRY_MAX_SEC` / `NOTIFY_RETRY_MAX_ATTEMPTS` / `NOTIFY_RETRY_TICK_SEC` – notify delivery queue TTL and retry policy (backoff, max attempts, worker interval).
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:
@@ -319,6 +320,14 @@ Security controls:
 
 - payload size limit: `NOTIFY_MAX_PAYLOAD_BYTES`
 - rate limit: `NOTIFY_RATE_LIMIT_COUNT` per `NOTIFY_RATE_LIMIT_WINDOW_SEC`
+
+Delivery reliability:
+
+- accepted notify payloads are persisted to `tmp/notify_delivery_queue.json`
+- failed Slack posts are retried with backoff (`NOTIFY_RETRY_*`)
+- expired queue items are dropped by `NOTIFY_QUEUE_TTL_SEC`
+- pending queue items are replayed on startup by the background worker
+- logs include delivery failures and last error details
 
 Payload must be a JSON object and must include either:
 

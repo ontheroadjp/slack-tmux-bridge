@@ -13,6 +13,12 @@ def _reset_ingress_state():
         stb.NOTIFY_INGRESS_STATE["accepted"] = 0
         stb.NOTIFY_INGRESS_STATE["rejected"] = 0
         stb.NOTIFY_INGRESS_STATE["last_error"] = None
+    stb.NOTIFY_DELIVERY_STATE["enqueued"] = 0
+    stb.NOTIFY_DELIVERY_STATE["sent"] = 0
+    stb.NOTIFY_DELIVERY_STATE["failed"] = 0
+    stb.NOTIFY_DELIVERY_STATE["dropped_ttl"] = 0
+    stb.NOTIFY_DELIVERY_STATE["dropped_max_attempts"] = 0
+    stb.NOTIFY_DELIVERY_STATE["last_error"] = None
 
 
 def test_validate_notify_payload_bytes_accepts_json_object():
@@ -34,19 +40,12 @@ def test_validate_notify_payload_bytes_rejects_large_payload(monkeypatch):
     assert error == "payload too large"
 
 
-def test_accept_notify_payload_posts_with_explicit_destination(monkeypatch):
+def test_accept_notify_payload_queues_with_explicit_destination(tmp_path, monkeypatch):
     _reset_ingress_state()
     monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_COUNT", 30)
     monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_WINDOW_SEC", 60)
-
-    sent = {}
-    monkeypatch.setattr(
-        stb,
-        "_post_message",
-        lambda channel_id, text, thread_ts=None, blocks=None: sent.update(
-            {"channel_id": channel_id, "text": text, "thread_ts": thread_ts}
-        ),
-    )
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
 
     accepted, reason = stb._accept_notify_payload(
         {
@@ -59,27 +58,22 @@ def test_accept_notify_payload_posts_with_explicit_destination(monkeypatch):
 
     assert accepted is True
     assert reason == ""
-    assert sent["channel_id"] == "C1"
-    assert sent["thread_ts"] == "123.456"
-    assert sent["text"] == "notify message"
+    state = stb._load_notify_queue()
+    assert len(state["items"]) == 1
+    assert state["items"][0]["channel_id"] == "C1"
+    assert state["items"][0]["thread_ts"] == "123.456"
+    assert state["items"][0]["text"] == "notify message"
 
 
 def test_accept_notify_payload_resolves_destination_by_pane_id(tmp_path, monkeypatch):
     _reset_ingress_state()
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
     monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
     stb._atomic_write_json(
         str(notify_context_path),
         {"%9": {"channel_id": "C9", "thread_ts": "9.999", "updated_at": time.time()}},
-    )
-
-    sent = {}
-    monkeypatch.setattr(
-        stb,
-        "_post_message",
-        lambda channel_id, text, thread_ts=None, blocks=None: sent.update(
-            {"channel_id": channel_id, "text": text, "thread_ts": thread_ts}
-        ),
     )
 
     accepted, reason = stb._accept_notify_payload(
@@ -89,15 +83,16 @@ def test_accept_notify_payload_resolves_destination_by_pane_id(tmp_path, monkeyp
 
     assert accepted is True
     assert reason == ""
-    assert sent["channel_id"] == "C9"
-    assert sent["thread_ts"] == "9.999"
-    assert sent["text"] == "hello"
+    state = stb._load_notify_queue()
+    assert len(state["items"]) == 1
+    assert state["items"][0]["channel_id"] == "C9"
+    assert state["items"][0]["thread_ts"] == "9.999"
+    assert state["items"][0]["text"] == "hello"
 
 
 def test_accept_notify_payload_rejects_when_destination_missing(monkeypatch):
     _reset_ingress_state()
     monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", "/tmp/not-existing-notify-context.json")
-    monkeypatch.setattr(stb, "_post_message", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not post")))
 
     accepted, reason = stb._accept_notify_payload({"pane_id": "%404"}, source="test")
     assert accepted is False
@@ -108,7 +103,6 @@ def test_accept_notify_payload_rejects_by_rate_limit(monkeypatch):
     _reset_ingress_state()
     monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_COUNT", 1)
     monkeypatch.setattr(stb, "NOTIFY_RATE_LIMIT_WINDOW_SEC", 60)
-    monkeypatch.setattr(stb, "_post_message", lambda *_args, **_kwargs: None)
 
     payload = {"channel_id": "C1", "thread_ts": "1.2", "last-assistant-message": "x"}
     first_ok, _ = stb._accept_notify_payload(payload, source="test")
@@ -117,3 +111,86 @@ def test_accept_notify_payload_rejects_by_rate_limit(monkeypatch):
     assert first_ok is True
     assert second_ok is False
     assert reason == "rate limited"
+
+
+def test_process_notify_queue_retries_and_succeeds(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    monkeypatch.setattr(stb, "NOTIFY_RETRY_MAX_ATTEMPTS", 5)
+    monkeypatch.setattr(stb, "NOTIFY_RETRY_BASE_SEC", 1.0)
+    monkeypatch.setattr(stb, "NOTIFY_RETRY_MAX_SEC", 10.0)
+
+    now = time.time()
+    stb._save_notify_queue(
+        {
+            "items": [
+                {
+                    "channel_id": "C1",
+                    "thread_ts": "t1",
+                    "pane_id": "%1",
+                    "turn_id": "turn-1",
+                    "text": "hello",
+                    "source": "http",
+                    "created_at": now,
+                    "next_attempt_at": now,
+                    "attempts": 0,
+                    "last_error": "",
+                }
+            ]
+        }
+    )
+
+    calls = {"count": 0}
+
+    def _post_result(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return False, "temporary error"
+        return True, ""
+
+    monkeypatch.setattr(stb, "_post_message_with_result", _post_result)
+    monkeypatch.setattr(stb, "_record_notify_delivery_event", lambda *_args, **_kwargs: None)
+
+    stb._process_notify_queue_once(now_ts=now)
+    state = stb._load_notify_queue()
+    assert len(state["items"]) == 1
+    assert state["items"][0]["attempts"] == 1
+
+    retry_at = state["items"][0]["next_attempt_at"]
+    stb._process_notify_queue_once(now_ts=retry_at + 0.1)
+    state = stb._load_notify_queue()
+    assert state["items"] == []
+
+
+def test_process_notify_queue_drops_ttl(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_TTL_SEC", 1)
+
+    now = time.time()
+    stb._save_notify_queue(
+        {
+            "items": [
+                {
+                    "channel_id": "C1",
+                    "thread_ts": "t1",
+                    "pane_id": "%1",
+                    "turn_id": "turn-1",
+                    "text": "hello",
+                    "source": "http",
+                    "created_at": now - 100,
+                    "next_attempt_at": now - 99,
+                    "attempts": 0,
+                    "last_error": "",
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr(stb, "_post_message_with_result", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not post")))
+    stb._process_notify_queue_once(now_ts=now)
+    state = stb._load_notify_queue()
+    assert state["items"] == []
+    assert stb.NOTIFY_DELIVERY_STATE["dropped_ttl"] >= 1

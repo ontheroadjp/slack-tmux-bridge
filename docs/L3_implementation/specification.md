@@ -58,6 +58,11 @@
 | `NOW_WATCH_TIMEOUT_SEC` | `180` | `/now` 監視タイムアウト | 変化が続く場合の打ち切りと継続促しのため |
 | `EXECUTE_RESULT_MODE` | `poll` | 実行ボタン押下後の結果取得方式 (`poll`/`notify`/`both`) | ポーリングと Codex notify の重複運用を制御するため |
 | `NOTIFY_DEDUPE_TTL_SEC` | `900` | poll/notify 重複排除キー保持秒数 | `both` での二重投稿を防ぐため |
+| `NOTIFY_QUEUE_TTL_SEC` | `3600` | notify 配送キュー保持秒数 | 一時障害時の再試行と古い通知の破棄を両立するため |
+| `NOTIFY_RETRY_BASE_SEC` | `2` | 再試行初期待機秒数 | 失敗直後の再送を間引くため |
+| `NOTIFY_RETRY_MAX_SEC` | `60` | 再試行待機上限秒数 | 過剰な待機増加を抑えるため |
+| `NOTIFY_RETRY_MAX_ATTEMPTS` | `10` | 再試行最大回数 | 永続失敗時の無限ループを防ぐため |
+| `NOTIFY_RETRY_TICK_SEC` | `1` | キューワーカー周期秒数 | 起動時再処理と通常配送のポーリング間隔を制御するため |
 | `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---
@@ -113,6 +118,7 @@ python goslack.py rm 4
 - `goslack.py notify` は JSON の `last-assistant-message` を投稿本文として Slack に投稿する。
 - 投稿先は tmux の現在 `pane_id` と `active_sessions.json` の `pane_id` の一致で解決し、同じ `pane_id` に記録された最新の Slack `thread_ts` へ返信する。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
+- `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。
 
 ---
 

@@ -51,14 +51,11 @@ def test_cli_rm_by_number(tmp_path, monkeypatch):
     assert "C9" in sessions
 
 
-def test_cli_notify_calls_handler(monkeypatch):
-    called = {}
-
-    def _handle_notify(payload):
-        called["payload"] = payload
-
-    monkeypatch.setattr(goslack, "handle_notify", _handle_notify)
+def test_cli_notify_subcommand_is_not_supported(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["goslack.py", "notify", "{\"thread-id\":\"t1\"}"])
-    goslack.main()
-
-    assert called["payload"] == "{\"thread-id\":\"t1\"}"
+    try:
+        goslack.main()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("SystemExit expected")

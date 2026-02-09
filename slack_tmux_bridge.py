@@ -11,6 +11,8 @@ import tempfile
 import socket
 import socketserver
 import http.server
+import urllib.request
+import urllib.error
 from datetime import datetime
 from collections import deque
 
@@ -65,6 +67,7 @@ NOTIFY_RETRY_BASE_SEC = float(os.environ.get("NOTIFY_RETRY_BASE_SEC", "2"))
 NOTIFY_RETRY_MAX_SEC = float(os.environ.get("NOTIFY_RETRY_MAX_SEC", "60"))
 NOTIFY_RETRY_MAX_ATTEMPTS = int(os.environ.get("NOTIFY_RETRY_MAX_ATTEMPTS", "10"))
 NOTIFY_RETRY_TICK_SEC = float(os.environ.get("NOTIFY_RETRY_TICK_SEC", "1"))
+NOTIFY_FORWARD_TIMEOUT_SEC = float(os.environ.get("NOTIFY_FORWARD_TIMEOUT_SEC", "3"))
 
 
 # Healthcheck & cleanup
@@ -449,6 +452,84 @@ def _notify_delivery_worker():
             log(f"notify delivery worker error: {e}")
         sleep_sec = NOTIFY_RETRY_TICK_SEC if NOTIFY_RETRY_TICK_SEC > 0 else 1.0
         time.sleep(sleep_sec)
+
+def _read_notify_payload_arg(arg_payload: str) -> str:
+    if arg_payload and arg_payload != "-":
+        return arg_payload
+    data = sys.stdin.read()
+    return data.strip() if data else ""
+
+def _forward_notify_payload_http(raw_payload: str):
+    url = f"http://{NOTIFY_HTTP_HOST}:{NOTIFY_HTTP_PORT}{NOTIFY_HTTP_PATH}"
+    req = urllib.request.Request(
+        url=url,
+        data=raw_payload.encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=NOTIFY_FORWARD_TIMEOUT_SEC) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return False, f"http {exc.code}: {body}"
+    except Exception as exc:
+        return False, f"http request failed: {exc}"
+    if not body:
+        return False, "http response empty"
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False, f"http response is not json: {body}"
+    if not isinstance(payload, dict):
+        return False, "http response is not object"
+    if payload.get("ok") is True:
+        return True, ""
+    return False, payload.get("error") or "http ingress rejected payload"
+
+def _forward_notify_payload_uds(raw_payload: str):
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(NOTIFY_FORWARD_TIMEOUT_SEC)
+        sock.connect(NOTIFY_UDS_PATH)
+        sock.sendall(raw_payload.encode("utf-8") + b"\n")
+        response = sock.recv(4096).decode("utf-8", errors="replace").strip()
+        sock.close()
+    except Exception as exc:
+        return False, f"uds request failed: {exc}"
+    if not response:
+        return False, "uds response empty"
+    try:
+        payload = json.loads(response)
+    except json.JSONDecodeError:
+        return False, f"uds response is not json: {response}"
+    if not isinstance(payload, dict):
+        return False, "uds response is not object"
+    if payload.get("ok") is True:
+        return True, ""
+    return False, payload.get("error") or "uds ingress rejected payload"
+
+def _forward_notify_payload(raw_payload: str):
+    transport = NOTIFY_INGRESS_TRANSPORT
+    if transport == "http":
+        return _forward_notify_payload_http(raw_payload)
+    if transport == "uds":
+        return _forward_notify_payload_uds(raw_payload)
+    return False, f"unsupported NOTIFY_INGRESS_TRANSPORT: {transport}"
+
+def run_notify_cli(payload_arg: str) -> int:
+    raw_payload = _read_notify_payload_arg(payload_arg)
+    ok, error, _payload = _validate_notify_payload_bytes(raw_payload.encode("utf-8"))
+    if not ok:
+        print(f"⚠️ Warning: notify payload rejected: {error}")
+        return 1
+
+    forwarded, reason = _forward_notify_payload(raw_payload)
+    if forwarded:
+        print("ℹ️ notify payload forwarded to slack_tmux_bridge ingress.")
+        return 0
+    print(f"⚠️ Warning: notify forwarding failed: {reason}")
+    return 1
 
 # =====================
 # Notify ingress helpers
@@ -1993,6 +2074,10 @@ def stop_notify_ingress():
 # main
 # =====================
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "notify":
+        payload_arg = sys.argv[2] if len(sys.argv) >= 3 else "-"
+        sys.exit(run_notify_cli(payload_arg))
+
     configure_logging()
     log("Slack → tmux bridge (Multi-channel) started")
     ensure_required_tokens()

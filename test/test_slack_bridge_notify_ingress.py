@@ -325,3 +325,51 @@ def test_run_notify_cli_keeps_existing_thread_ts(monkeypatch):
     forwarded = captured["payload"]
     payload = stb.json.loads(forwarded)
     assert payload["thread_ts"] == "999.000"
+
+
+def test_run_notify_cli_normalizes_channel_id(monkeypatch):
+    captured = {}
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli('{"channel-id":"C123","thread-id":"123.456","last-assistant-message":"done"}')
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C123"
+    assert payload["channel-id"] == "C123"
+    assert payload["thread_ts"] == "123.456"
+
+
+def test_run_notify_cli_normalizes_pane_id(monkeypatch):
+    captured = {}
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli('{"pane-id":"%1","last-assistant-message":"done"}')
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["pane_id"] == "%1"
+    assert payload["pane-id"] == "%1"
+
+
+def test_run_notify_cli_keeps_existing_channel_id_and_pane_id(monkeypatch):
+    captured = {}
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli(
+        '{"channel-id":"C-hyphen","channel_id":"C-snake","pane-id":"%9","pane_id":"%8","last-assistant-message":"done"}'
+    )
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C-snake"
+    assert payload["pane_id"] == "%8"

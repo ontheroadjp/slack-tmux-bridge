@@ -521,6 +521,14 @@ def _normalize_notify_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return payload
     normalized = dict(payload)
+    if not normalized.get("channel_id"):
+        channel_id = normalized.get("channel-id")
+        if isinstance(channel_id, str) and channel_id.strip():
+            normalized["channel_id"] = channel_id.strip()
+    if not normalized.get("pane_id"):
+        pane_id = normalized.get("pane-id")
+        if isinstance(pane_id, str) and pane_id.strip():
+            normalized["pane_id"] = pane_id.strip()
     if not normalized.get("thread_ts"):
         thread_id = normalized.get("thread-id")
         if isinstance(thread_id, str) and thread_id.strip():

@@ -24,7 +24,7 @@ Evidence:
 
 # コンポーネント構成
 - `slack_tmux_bridge.py`: Slack イベント受信、コマンドフィルタ、tmux 入力/実行、出力取得、監視を担当。根拠: slack_tmux_bridge.py:150-310,516-583,640-685,892-972
-- `goslack.py`: チャンネル↔ペインの対応表 (active_sessions.json) を登録/更新/一覧/削除。根拠: goslack.py:164-205,245-359
+- `goslack.py`: チャンネル↔ペインの対応表 (active_sessions.json) を登録/更新/一覧/削除し、`notify` payload を bridge ingress へ転送する。根拠: goslack.py
 - `send_enter.sh`: tmux に Enter を送信するヘルパ。根拠: send_enter.sh:1-8
 - `active_sessions.json`: チャンネルID→pane_id/pane/dir/name のマッピング。根拠: goslack.py:267-283
 
@@ -32,6 +32,7 @@ Evidence:
 - 現在のディレクトリ名を Slack チャンネル名として解決し、見つからない場合は `ai-studio-01/02/03` を順にフォールバックする。根拠: README.md:84-113 / goslack.py:245-260
 - `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py:267-283
 - `list` は番号付きでセッションを出力し、`rm <number>` で削除する。根拠: goslack.py:164-205
+- `notify` は payload を `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、Slack 投稿責務は bridge 側に寄せる。必要時のみ `GOSLACK_NOTIFY_LEGACY_DIRECT_POST=1` で旧経路を一時利用可能。根拠: goslack.py
 
 # Slack 受信 → tmux 実行
 - Slack message イベントのみ処理し、未接続チャンネルは無視する。根拠: slack_tmux_bridge.py:892-938

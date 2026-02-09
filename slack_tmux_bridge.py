@@ -517,14 +517,26 @@ def _forward_notify_payload(raw_payload: str):
         return _forward_notify_payload_uds(raw_payload)
     return False, f"unsupported NOTIFY_INGRESS_TRANSPORT: {transport}"
 
+def _normalize_notify_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    if not normalized.get("thread_ts"):
+        thread_id = normalized.get("thread-id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            normalized["thread_ts"] = thread_id.strip()
+    return normalized
+
 def run_notify_cli(payload_arg: str) -> int:
     raw_payload = _read_notify_payload_arg(payload_arg)
-    ok, error, _payload = _validate_notify_payload_bytes(raw_payload.encode("utf-8"))
+    ok, error, payload = _validate_notify_payload_bytes(raw_payload.encode("utf-8"))
     if not ok:
         print(f"⚠️ Warning: notify payload rejected: {error}")
         return 1
 
-    forwarded, reason = _forward_notify_payload(raw_payload)
+    normalized_payload = _normalize_notify_payload(payload)
+    normalized_raw_payload = json.dumps(normalized_payload, ensure_ascii=False)
+    forwarded, reason = _forward_notify_payload(normalized_raw_payload)
     if forwarded:
         print("ℹ️ notify payload forwarded to slack_tmux_bridge ingress.")
         return 0

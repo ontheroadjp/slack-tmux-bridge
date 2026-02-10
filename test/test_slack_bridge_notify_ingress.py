@@ -31,6 +31,47 @@ def test_validate_notify_payload_bytes_accepts_json_object():
     assert payload["channel_id"] == "C1"
 
 
+def test_maybe_reset_notify_queue_on_start_enabled(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_RESET_ON_START", True)
+    stb._save_notify_queue(
+        {
+            "items": [
+                {"channel_id": "C1", "thread_ts": "123.456", "created_at": time.time()},
+                {"channel_id": "C2", "thread_ts": "223.456", "created_at": time.time()},
+            ]
+        }
+    )
+
+    dropped = stb._maybe_reset_notify_queue_on_start()
+    state = stb._load_notify_queue()
+
+    assert dropped == 2
+    assert state["items"] == []
+
+
+def test_maybe_reset_notify_queue_on_start_disabled(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_RESET_ON_START", False)
+    stb._save_notify_queue(
+        {
+            "items": [
+                {"channel_id": "C1", "thread_ts": "123.456", "created_at": time.time()},
+            ]
+        }
+    )
+
+    dropped = stb._maybe_reset_notify_queue_on_start()
+    state = stb._load_notify_queue()
+
+    assert dropped == 0
+    assert len(state["items"]) == 1
+
+
 def test_validate_notify_payload_bytes_rejects_large_payload(monkeypatch):
     _reset_ingress_state()
     monkeypatch.setattr(stb, "NOTIFY_MAX_PAYLOAD_BYTES", 10)
@@ -67,10 +108,16 @@ def test_accept_notify_payload_queues_with_explicit_destination(tmp_path, monkey
 
 def test_accept_notify_payload_resolves_destination_by_pane_id(tmp_path, monkeypatch):
     _reset_ingress_state()
+    sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
     queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
     monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
     monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C9": {"pane_id": "%9", "pane": "1:9.0", "dir": "/tmp/z", "name": "chan-z"}},
+    )
     stb._atomic_write_json(
         str(notify_context_path),
         {"%9": {"channel_id": "C9", "thread_ts": "9.999", "updated_at": time.time()}},
@@ -99,7 +146,7 @@ def test_accept_notify_payload_rejects_when_destination_missing(monkeypatch):
         source="test",
     )
     assert accepted is False
-    assert reason == "destination not found"
+    assert reason == "inactive session for pane_id"
 
 def test_accept_notify_payload_rejects_when_thread_missing(tmp_path, monkeypatch):
     _reset_ingress_state()
@@ -220,6 +267,76 @@ def test_process_notify_queue_drops_ttl(tmp_path, monkeypatch):
     state = stb._load_notify_queue()
     assert state["items"] == []
     assert stb.NOTIFY_DELIVERY_STATE["dropped_ttl"] >= 1
+
+
+def test_process_notify_queue_drops_invalid_thread_ts_error(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+
+    now = time.time()
+    stb._save_notify_queue(
+        {
+            "items": [
+                {
+                    "channel_id": "C1",
+                    "thread_ts": "019c44e4-0c68-7572-b3f1-dc74fe64b5ea",
+                    "pane_id": "%1",
+                    "turn_id": "turn-1",
+                    "text": "hello",
+                    "source": "http",
+                    "created_at": now,
+                    "next_attempt_at": now,
+                    "attempts": 0,
+                    "last_error": "",
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr(
+        stb,
+        "_post_message_with_result",
+        lambda *_args, **_kwargs: (False, "The server responded with: {'ok': False, 'error': 'invalid_thread_ts'}"),
+    )
+    stb._process_notify_queue_once(now_ts=now)
+    state = stb._load_notify_queue()
+    assert state["items"] == []
+
+
+def test_process_notify_queue_drops_channel_not_found_error(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+
+    now = time.time()
+    stb._save_notify_queue(
+        {
+            "items": [
+                {
+                    "channel_id": "C1",
+                    "thread_ts": "123.456",
+                    "pane_id": "%1",
+                    "turn_id": "turn-1",
+                    "text": "hello",
+                    "source": "http",
+                    "created_at": now,
+                    "next_attempt_at": now,
+                    "attempts": 0,
+                    "last_error": "",
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr(
+        stb,
+        "_post_message_with_result",
+        lambda *_args, **_kwargs: (False, "The server responded with: {'ok': False, 'error': 'channel_not_found'}"),
+    )
+    stb._process_notify_queue_once(now_ts=now)
+    state = stb._load_notify_queue()
+    assert state["items"] == []
 
 
 def test_notify_ingress_accept_then_delivery_posts_to_slack(tmp_path, monkeypatch):
@@ -343,8 +460,14 @@ def test_run_notify_cli_normalizes_channel_id(monkeypatch):
     assert payload["thread_ts"] == "123.456"
 
 
-def test_run_notify_cli_normalizes_pane_id(monkeypatch):
+def test_run_notify_cli_normalizes_pane_id(tmp_path, monkeypatch):
     captured = {}
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C123": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
 
     def _forward(raw):
         captured["payload"] = raw
@@ -358,8 +481,14 @@ def test_run_notify_cli_normalizes_pane_id(monkeypatch):
     assert payload["pane-id"] == "%1"
 
 
-def test_run_notify_cli_keeps_existing_channel_id_and_pane_id(monkeypatch):
+def test_run_notify_cli_keeps_existing_channel_id_and_pane_id(tmp_path, monkeypatch):
     captured = {}
+    sessions_path = tmp_path / "active_sessions.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C-snake": {"pane_id": "%8", "pane": "1:8.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
 
     def _forward(raw):
         captured["payload"] = raw
@@ -375,11 +504,38 @@ def test_run_notify_cli_keeps_existing_channel_id_and_pane_id(monkeypatch):
     assert payload["pane_id"] == "%8"
 
 
-def test_run_notify_cli_rejects_when_channel_id_missing_after_normalization(capsys):
+def test_run_notify_cli_rejects_when_channel_id_missing_after_normalization(monkeypatch, capsys):
+    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", "/tmp/not-existing-notify-context.json")
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     rc = stb.run_notify_cli('{"thread-id":"123.456","last-assistant-message":"done"}')
     assert rc == 1
     out = capsys.readouterr().out
     assert "missing required field: channel_id" in out
+
+
+def test_run_notify_cli_resolves_channel_by_thread_id_from_context(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    stb._atomic_write_json(
+        str(notify_context_path),
+        {
+            "%1": {"channel_id": "C1", "thread_ts": "123.456", "updated_at": 10},
+            "%2": {"channel_id": "C2", "thread_ts": "999.000", "updated_at": 11},
+        },
+    )
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli('{"thread-id":"123.456","last-assistant-message":"done"}')
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C1"
+    assert payload["thread_ts"] == "123.456"
 
 
 def test_run_notify_cli_resolves_channel_and_thread_by_pane_id(tmp_path, monkeypatch):
@@ -408,7 +564,67 @@ def test_run_notify_cli_resolves_channel_and_thread_by_pane_id(tmp_path, monkeyp
     assert payload["pane_id"] == "%1"
 
 
-def test_run_notify_cli_rejects_when_thread_ts_missing_after_normalization(capsys):
+def test_run_notify_cli_resolves_destination_by_tmux_pane_env(tmp_path, monkeypatch):
+    captured = {}
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
+    stb._atomic_write_json(
+        str(notify_context_path),
+        {"%1": {"channel_id": "C1", "thread_ts": "123.456", "updated_at": time.time()}},
+    )
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli('{"last-assistant-message":"done"}')
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C1"
+    assert payload["thread_ts"] == "123.456"
+
+
+def test_run_notify_cli_ignores_non_slack_thread_id_and_uses_context(tmp_path, monkeypatch):
+    captured = {}
+    sessions_path = tmp_path / "active_sessions.json"
+    notify_context_path = tmp_path / "tmp" / "notify_context.json"
+    monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
+    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    stb._atomic_write_json(
+        str(sessions_path),
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
+    )
+    stb._atomic_write_json(
+        str(notify_context_path),
+        {"%1": {"channel_id": "C1", "thread_ts": "123.456", "updated_at": time.time()}},
+    )
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
+    rc = stb.run_notify_cli(
+        '{"thread-id":"019c44e4-0c68-7572-b3f1-dc74fe64b5ea","last-assistant-message":"done"}'
+    )
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C1"
+    assert payload["thread_ts"] == "123.456"
+    assert "thread-id" in payload
+
+
+def test_run_notify_cli_rejects_when_thread_ts_missing_after_normalization(monkeypatch, capsys):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     rc = stb.run_notify_cli('{"channel-id":"C123","last-assistant-message":"done"}')
     assert rc == 1
     out = capsys.readouterr().out

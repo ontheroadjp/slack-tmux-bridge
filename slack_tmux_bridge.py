@@ -67,6 +67,7 @@ NOTIFY_RETRY_BASE_SEC = float(os.environ.get("NOTIFY_RETRY_BASE_SEC", "2"))
 NOTIFY_RETRY_MAX_SEC = float(os.environ.get("NOTIFY_RETRY_MAX_SEC", "60"))
 NOTIFY_RETRY_MAX_ATTEMPTS = int(os.environ.get("NOTIFY_RETRY_MAX_ATTEMPTS", "10"))
 NOTIFY_RETRY_TICK_SEC = float(os.environ.get("NOTIFY_RETRY_TICK_SEC", "1"))
+NOTIFY_QUEUE_RESET_ON_START = os.environ.get("NOTIFY_QUEUE_RESET_ON_START", "0") == "1"
 NOTIFY_FORWARD_TIMEOUT_SEC = float(os.environ.get("NOTIFY_FORWARD_TIMEOUT_SEC", "3"))
 
 
@@ -346,6 +347,20 @@ def _save_notify_queue(state):
         state = {"items": []}
     _atomic_write_json(NOTIFY_QUEUE_FILE, state)
 
+def _clear_notify_queue(reason: str = "manual_reset") -> int:
+    with NOTIFY_QUEUE_LOCK:
+        state = _load_notify_queue()
+        items = state.get("items", [])
+        count = len(items) if isinstance(items, list) else 0
+        _save_notify_queue({"items": []})
+    log(f"notify queue cleared reason={reason} dropped={count}")
+    return count
+
+def _maybe_reset_notify_queue_on_start():
+    if not NOTIFY_QUEUE_RESET_ON_START:
+        return 0
+    return _clear_notify_queue(reason="startup_reset")
+
 def _calc_retry_delay(attempt: int) -> float:
     base = NOTIFY_RETRY_BASE_SEC if NOTIFY_RETRY_BASE_SEC > 0 else 1.0
     max_delay = NOTIFY_RETRY_MAX_SEC if NOTIFY_RETRY_MAX_SEC > 0 else base
@@ -379,6 +394,17 @@ def _drop_notify_item(reason: str, item: dict):
         f" reason={reason} channel={item.get('channel_id')}"
         f" thread_ts={item.get('thread_ts')} attempts={item.get('attempts')}"
     )
+
+def _is_permanent_slack_post_error(error: str) -> bool:
+    if not isinstance(error, str):
+        return False
+    permanent_codes = [
+        "invalid_thread_ts",
+        "channel_not_found",
+        "not_in_channel",
+        "is_archived",
+    ]
+    return any(code in error for code in permanent_codes)
 
 def _process_notify_queue_once(now_ts=None):
     now_ts = now_ts if now_ts is not None else time.time()
@@ -427,6 +453,9 @@ def _process_notify_queue_once(now_ts=None):
             item["last_error"] = error
             item["last_attempt_at"] = now_ts
             NOTIFY_DELIVERY_STATE["last_error"] = error
+            if _is_permanent_slack_post_error(error):
+                _drop_notify_item("permanent_post_error", item)
+                continue
             if NOTIFY_RETRY_MAX_ATTEMPTS > 0 and attempts >= NOTIFY_RETRY_MAX_ATTEMPTS:
                 _drop_notify_item("max_attempts", item)
                 continue
@@ -517,6 +546,45 @@ def _forward_notify_payload(raw_payload: str):
         return _forward_notify_payload_uds(raw_payload)
     return False, f"unsupported NOTIFY_INGRESS_TRANSPORT: {transport}"
 
+def _is_valid_slack_thread_ts(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    return re.match(r"^\d+\.\d+$", value) is not None
+
+def _resolve_payload_pane_id(payload: dict):
+    if not isinstance(payload, dict):
+        return None
+    pane_id = payload.get("pane_id")
+    if isinstance(pane_id, str) and pane_id.strip():
+        return pane_id.strip()
+    # Only infer from TMUX_PANE when payload itself does not specify channel.
+    # This prevents unrelated explicit channel payloads from being tied to caller env.
+    has_channel = False
+    for key in ("channel_id", "channel-id"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            has_channel = True
+            break
+    if has_channel:
+        return None
+    env_pane = os.environ.get("TMUX_PANE")
+    if isinstance(env_pane, str) and env_pane.strip():
+        return env_pane.strip()
+    return None
+
+def _is_pane_connected(pane_id: str) -> bool:
+    if not isinstance(pane_id, str) or not pane_id.strip():
+        return False
+    sessions = _get_sessions()
+    if not isinstance(sessions, dict):
+        return False
+    for value in sessions.values():
+        if not isinstance(value, dict):
+            continue
+        if value.get("pane_id") == pane_id:
+            return True
+    return False
+
 def _normalize_notify_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return payload
@@ -529,9 +597,13 @@ def _normalize_notify_payload(payload: dict) -> dict:
         pane_id = normalized.get("pane-id")
         if isinstance(pane_id, str) and pane_id.strip():
             normalized["pane_id"] = pane_id.strip()
+    if not normalized.get("pane_id"):
+        pane_id = _resolve_payload_pane_id(normalized)
+        if pane_id:
+            normalized["pane_id"] = pane_id
     if not normalized.get("thread_ts"):
         thread_id = normalized.get("thread-id")
-        if isinstance(thread_id, str) and thread_id.strip():
+        if isinstance(thread_id, str) and _is_valid_slack_thread_ts(thread_id.strip()):
             normalized["thread_ts"] = thread_id.strip()
     return normalized
 
@@ -541,6 +613,9 @@ def _validate_notify_payload_for_thread_reply(payload: dict):
     message = payload.get("last-assistant-message")
     if not isinstance(message, str) or not message.strip():
         return False, "missing required field: last-assistant-message"
+    pane_id = _resolve_payload_pane_id(payload)
+    if pane_id and not _is_pane_connected(pane_id):
+        return False, "inactive session for pane_id"
     channel_id, thread_ts = _resolve_notify_destination(payload)
     if not isinstance(channel_id, str) or not channel_id.strip():
         return False, "missing required field: channel_id"
@@ -559,7 +634,25 @@ def run_notify_cli(payload_arg: str) -> int:
     valid, reason = _validate_notify_payload_for_thread_reply(normalized_payload)
     if not valid:
         print(f"⚠️ Warning: notify payload rejected: {reason}")
+        try:
+            resolved_channel_id, resolved_thread_ts = _resolve_notify_destination(normalized_payload)
+            keys = sorted(normalized_payload.keys())
+            tmux_pane = os.environ.get("TMUX_PANE", "")
+            print(
+                "ℹ️ debug: "
+                f"keys={keys} "
+                f"resolved_channel_id={resolved_channel_id} "
+                f"resolved_thread_ts={resolved_thread_ts} "
+                f"tmux_pane={tmux_pane}"
+            )
+        except Exception:
+            pass
         return 1
+    resolved_channel_id, resolved_thread_ts = _resolve_notify_destination(normalized_payload)
+    if resolved_channel_id and not normalized_payload.get("channel_id"):
+        normalized_payload["channel_id"] = resolved_channel_id
+    if resolved_thread_ts and not _is_valid_slack_thread_ts(normalized_payload.get("thread_ts")):
+        normalized_payload["thread_ts"] = resolved_thread_ts
     normalized_raw_payload = json.dumps(normalized_payload, ensure_ascii=False)
     forwarded, reason = _forward_notify_payload(normalized_raw_payload)
     if forwarded:
@@ -621,27 +714,43 @@ def _resolve_notify_destination(payload: dict):
         return None, None
     channel_id = payload.get("channel_id")
     thread_ts = payload.get("thread_ts")
+    if not _is_valid_slack_thread_ts(thread_ts):
+        thread_ts = None
     if channel_id and thread_ts:
         return channel_id, thread_ts
-    pane_id = payload.get("pane_id")
-    if not pane_id:
-        return channel_id, thread_ts
-    if not channel_id:
-        sessions = _get_sessions()
-        if isinstance(sessions, dict):
-            for ch_id, value in sessions.items():
-                if not isinstance(value, dict):
-                    continue
-                if value.get("pane_id") == pane_id:
-                    channel_id = ch_id
-                    break
+    pane_id = _resolve_payload_pane_id(payload)
     context = _load_notify_context()
-    ctx = context.get(pane_id) if isinstance(context, dict) else None
-    if isinstance(ctx, dict):
+    if pane_id:
         if not channel_id:
-            channel_id = ctx.get("channel_id")
-        if not thread_ts:
-            thread_ts = ctx.get("thread_ts")
+            sessions = _get_sessions()
+            if isinstance(sessions, dict):
+                for ch_id, value in sessions.items():
+                    if not isinstance(value, dict):
+                        continue
+                    if value.get("pane_id") == pane_id:
+                        channel_id = ch_id
+                        break
+        ctx = context.get(pane_id) if isinstance(context, dict) else None
+        if isinstance(ctx, dict):
+            if not channel_id:
+                channel_id = ctx.get("channel_id")
+            if not thread_ts:
+                thread_ts = ctx.get("thread_ts")
+    if not channel_id and thread_ts and isinstance(context, dict):
+        matched = []
+        for value in context.values():
+            if not isinstance(value, dict):
+                continue
+            if value.get("thread_ts") != thread_ts:
+                continue
+            ts = value.get("updated_at")
+            score = ts if isinstance(ts, (int, float)) else 0
+            matched.append((score, value.get("channel_id")))
+        if matched:
+            matched.sort(key=lambda x: x[0], reverse=True)
+            candidate = matched[0][1]
+            if isinstance(candidate, str) and candidate.strip():
+                channel_id = candidate
     return channel_id, thread_ts
 
 def _resolve_pane_id_for_delivery(payload: dict, channel_id: str):
@@ -675,6 +784,12 @@ def _accept_notify_payload(payload: dict, source: str):
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "missing required field: last-assistant-message"
         return False, "missing required field: last-assistant-message"
+    pane_id_hint = _resolve_payload_pane_id(payload)
+    if pane_id_hint and not _is_pane_connected(pane_id_hint):
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "inactive session for pane_id"
+        return False, "inactive session for pane_id"
 
     channel_id, thread_ts = _resolve_notify_destination(payload)
     if not channel_id:
@@ -687,6 +802,11 @@ def _accept_notify_payload(payload: dict, source: str):
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "thread destination not found"
         return False, "thread destination not found"
+    if not _is_valid_slack_thread_ts(thread_ts):
+        with NOTIFY_INGRESS_LOCK:
+            NOTIFY_INGRESS_STATE["rejected"] += 1
+            NOTIFY_INGRESS_STATE["last_error"] = "invalid thread_ts"
+        return False, "invalid thread_ts"
 
     pane_id = _resolve_pane_id_for_delivery(payload, channel_id)
     turn_id = payload.get("turn-id") if isinstance(payload, dict) else None
@@ -1493,6 +1613,87 @@ def _get_tmux_target_or_notify(channel_id: str, thread_ts: str = None, message: 
         _post_message(channel_id, message, thread_ts=thread_ts)
     return tmux_target
 
+def _build_input_context(
+    *,
+    source: str,
+    channel_id: str = None,
+    thread_ts: str = None,
+    text: str = "",
+    tmux_target: str = None,
+):
+    return {
+        "source": source,
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "text": text,
+        "tmux_target": tmux_target,
+    }
+
+def _normalize_message_input(event) -> dict:
+    channel_id = event.get("channel")
+    if not channel_id:
+        return _build_input_context(source="message")
+    text = ""
+    if event.get("user") and not event.get("bot_id") and event.get("text"):
+        text = event["text"].strip()
+        if text.startswith("\\/"):
+            text = text[1:]
+    return _build_input_context(
+        source="message",
+        channel_id=channel_id,
+        thread_ts=_get_thread_ts_from_message(event),
+        text=text,
+    )
+
+def _normalize_action_input(body, *, source: str) -> dict:
+    channel = body.get("channel", {}) if isinstance(body, dict) else {}
+    message = body.get("message", {}) if isinstance(body, dict) else {}
+    return _build_input_context(
+        source=source,
+        channel_id=channel.get("id"),
+        thread_ts=_get_thread_ts_from_message(message),
+    )
+
+def _send_tmux_text_for_context(ctx: dict, text: str, *, pre_clear: bool = False) -> bool:
+    channel_id = ctx.get("channel_id")
+    thread_ts = ctx.get("thread_ts")
+    tmux_target = ctx.get("tmux_target")
+    if not tmux_target:
+        return False
+    if pre_clear:
+        pre_clear_tmux(tmux_target)
+    send_text_to_tmux(
+        tmux_target,
+        _with_reply_instruction(text, channel_id, thread_ts),
+        thread_ts=thread_ts,
+        channel_id=channel_id,
+    )
+    if thread_ts:
+        _record_notify_context(channel_id, thread_ts)
+    return True
+
+def _execute_enter_for_context(
+    ctx: dict,
+    *,
+    pre_clear: bool = False,
+    start_execute_watch: bool = False,
+    record_notify_context: bool = True,
+) -> bool:
+    channel_id = ctx.get("channel_id")
+    thread_ts = ctx.get("thread_ts")
+    tmux_target = ctx.get("tmux_target")
+    if not tmux_target:
+        return False
+    if pre_clear:
+        pre_clear_tmux(tmux_target)
+    send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
+    _start_permission_watch(thread_ts, channel_id, tmux_target)
+    if thread_ts and record_notify_context:
+        _record_notify_context(channel_id, thread_ts)
+    if start_execute_watch and EXECUTE_RESULT_MODE in ("poll", "both"):
+        _start_execute_watch(thread_ts, channel_id, tmux_target)
+    return True
+
 def _handle_prompt_text(channel_id: str, thread_ts: str, tmux_target: str, text: str):
     log(f"SLACK MESSAGE: {text} (Channel: {channel_id} -> Tmux: {tmux_target})")
 
@@ -1672,16 +1873,14 @@ def _handle_command_menu(channel_id: str, thread_ts: str) -> bool:
     return True
 
 def _handle_numeric_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
-    # ① プリクリア
-    pre_clear_tmux(tmux_target)
-
-    # ② 文字送信
-    send_text_to_tmux(
-        tmux_target,
-        _with_reply_instruction(text, channel_id, thread_ts),
+    ctx = _build_input_context(
+        source="message.numeric",
+        channel_id=channel_id,
         thread_ts=thread_ts,
-        channel_id=channel_id
+        text=text,
+        tmux_target=tmux_target,
     )
+    _send_tmux_text_for_context(ctx, text, pre_clear=True)
 
     # ③ 通知
     _post_message(
@@ -1691,19 +1890,18 @@ def _handle_numeric_message(channel_id: str, thread_ts: str, tmux_target: str, t
     )
 
     # ④ Enter送信
-    send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
-    _start_permission_watch(thread_ts, channel_id, tmux_target)
-    _record_notify_context(channel_id, thread_ts)
+    _execute_enter_for_context(ctx, record_notify_context=False)
 
 def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text: str):
-    # ① 文字だけ tmux に送る
-    send_text_to_tmux(
-        tmux_target,
-        _with_reply_instruction(text, channel_id, thread_ts),
+    ctx = _build_input_context(
+        source="message.text",
+        channel_id=channel_id,
         thread_ts=thread_ts,
-        channel_id=channel_id
+        text=text,
+        tmux_target=tmux_target,
     )
-    _record_notify_context(channel_id, thread_ts)
+    # ① 文字だけ tmux に送る
+    _send_tmux_text_for_context(ctx, text)
 
     # ② 同じメッセージのスレッドに操作ボタンを出す
     _post_message(
@@ -1746,32 +1944,18 @@ def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text
 
 @app.event("message")
 def handle_message(event, logger):
-    channel_id = event.get("channel")
+    ctx = _normalize_message_input(event)
+    channel_id = ctx.get("channel_id")
     if not channel_id:
         return
 
-    # 1. Extract text and check validity
-    text = ""
-    if (
-        event.get("user")
-        and not event.get("bot_id")
-        and event.get("text")
-    ):
-        text = event["text"].strip()
-    
+    text = ctx.get("text") or ""
     if not text:
         return
 
     log(f"TEXT RAW: {repr(text)}")
     log(f"TEXT NORM: {repr(_normalize_slash_command_text(text))}")
-
-    # Slackでスラッシュコマンドをエスケープした際（例: \/quit）にバックスラッシュを削除
-    # ただし、 \rm や \ls のようなシェル用エスケープは維持したいので、
-    # 次の文字が / の場合のみ削除する
-    if text.startswith("\\/"):
-        text = text[1:]
-
-    thread_ts = _get_thread_ts_from_message(event)
+    thread_ts = ctx.get("thread_ts")
 
     if _dispatch_command(text, channel_id, thread_ts):
         return
@@ -1803,15 +1987,16 @@ def handle_message(event, logger):
 def handle_send_enter(ack, body):
     ack()
     log("BUTTON CLICKED: send_enter")
-    
-    channel_id = body["channel"]["id"]
-    thread_ts = _get_thread_ts_from_message(body["message"])
+    ctx = _normalize_action_input(body, source="action.send_enter")
+    channel_id = ctx.get("channel_id")
+    thread_ts = ctx.get("thread_ts")
     tmux_target = _get_tmux_target_or_notify(
         channel_id,
         message="⚠️ Error: No active tmux session for this channel. Run `goslack` in your terminal."
     )
     if not tmux_target:
         return
+    ctx["tmux_target"] = tmux_target
 
     _post_message(
         channel_id,
@@ -1819,15 +2004,7 @@ def handle_send_enter(ack, body):
         thread_ts=thread_ts,
     )
 
-    # 仕様に合わせて実行前に必ずプリクリア
-    pre_clear_tmux(tmux_target)
-
-    # Enterを送る
-    send_enter(tmux_target, channel_id=channel_id)
-    _start_permission_watch(thread_ts, channel_id, tmux_target)
-    _record_notify_context(channel_id, thread_ts)
-    if EXECUTE_RESULT_MODE in ("poll", "both"):
-        _start_execute_watch(thread_ts, channel_id, tmux_target)
+    _execute_enter_for_context(ctx, pre_clear=True, start_execute_watch=True)
 
 # =====================
 # =====================
@@ -1928,20 +2105,22 @@ def handle_show_commands(ack, body):
 @app.action(re.compile("exec_cmd_.*"))
 def handle_slash_command(ack, body):
     ack()
-    
-    channel_id = body["channel"]["id"]
+    ctx = _normalize_action_input(body, source="action.exec_cmd")
+    channel_id = ctx.get("channel_id")
     tmux_target = _get_tmux_target_or_notify(channel_id)
     if not tmux_target:
         return
+    ctx["tmux_target"] = tmux_target
 
     # action_id が何であれ、value にコマンドが入っているのでそれを使う
     cmd_text = body["actions"][0]["value"]
+    ctx["text"] = cmd_text
     log(f"COMMAND CLICKED: {cmd_text}")
-    
-    thread_ts = _get_thread_ts_from_message(body["message"])
-    thread_ts = _require_thread_ts({"thread_ts": thread_ts}, channel_id)
+
+    thread_ts = _require_thread_ts({"thread_ts": ctx.get("thread_ts")}, channel_id)
     if not thread_ts:
         return
+    ctx["thread_ts"] = thread_ts
 
     # Apply command filter to button-triggered commands as well
     allowed, reason = is_command_allowed(cmd_text)
@@ -1958,19 +2137,8 @@ def handle_slash_command(ack, body):
 
     # 1. プリクリア (既存の入力も C-u の代わりに C-l で実質的に消えるか、C-uを併用)
     subprocess.run(_tmux_cmd("send-keys", "-t", tmux_target, "C-u")) # 念のため既存行クリア
-    pre_clear_tmux(tmux_target)
-    
-    # 2. コマンド入力
-    send_text_to_tmux(
-        tmux_target,
-        _with_reply_instruction(cmd_text, channel_id, thread_ts),
-        thread_ts,
-        channel_id
-    )
-    
-    # 3. Enter
-    send_enter(tmux_target, thread_ts=thread_ts, channel_id=channel_id)
-    _start_permission_watch(thread_ts, channel_id, tmux_target)
+    _send_tmux_text_for_context(ctx, cmd_text, pre_clear=True)
+    _execute_enter_for_context(ctx, record_notify_context=False)
 
 # =====================
 # Slack: 🗑️ プロンプト削除
@@ -2145,6 +2313,14 @@ if __name__ == "__main__":
     # 初期化時に tmp ディレクトリ作成
     if not os.path.exists(TMP_DIR):
         os.makedirs(TMP_DIR)
+    if not os.path.exists(NOTIFY_QUEUE_FILE):
+        _atomic_write_json(NOTIFY_QUEUE_FILE, {"items": []})
+    reset_count = _maybe_reset_notify_queue_on_start()
+    if reset_count == 0:
+        queue_state = _load_notify_queue()
+        queue_items = queue_state.get("items", []) if isinstance(queue_state, dict) else []
+        queue_size = len(queue_items) if isinstance(queue_items, list) else 0
+        log(f"notify queue startup size={queue_size}")
 
     ensure_single_instance()
     atexit.register(stop_notify_ingress)
@@ -2157,7 +2333,5 @@ if __name__ == "__main__":
     # active_sessions.json がなければ作成
     if not os.path.exists(ACTIVE_SESSIONS_FILE):
         _atomic_write_json(ACTIVE_SESSIONS_FILE, {})
-    if not os.path.exists(NOTIFY_QUEUE_FILE):
-        _atomic_write_json(NOTIFY_QUEUE_FILE, {"items": []})
 
     SocketModeHandler(app, SLACK_APP_TOKEN).start()

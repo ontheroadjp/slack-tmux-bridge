@@ -768,3 +768,27 @@ def test_send_enter_starts_poll_watch_when_execute_mode_poll(monkeypatch):
 
     assert called["record"] == 1
     assert called["execute_watch"] == 1
+
+
+def test_slash_command_records_notify_context(monkeypatch):
+    called = {"record": 0}
+
+    monkeypatch.setattr(stb, "_get_tmux_target_or_notify", lambda *_args, **_kwargs: "1:1.0")
+    monkeypatch.setattr(stb, "_require_thread_ts", lambda message, _channel_id: message.get("thread_ts"))
+    monkeypatch.setattr(stb, "is_command_allowed", lambda _cmd: (True, ""))
+    monkeypatch.setattr(stb, "_post_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb.subprocess, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "pre_clear_tmux", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "send_text_to_tmux", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "send_enter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "_start_permission_watch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stb, "_record_notify_context", lambda *_args, **_kwargs: called.__setitem__("record", called["record"] + 1))
+
+    body = {
+        "channel": {"id": "C1"},
+        "message": {"ts": "123.456"},
+        "actions": [{"value": "/reset"}],
+    }
+    stb.handle_slash_command(lambda: None, body)
+
+    assert called["record"] == 1

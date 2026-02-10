@@ -50,7 +50,7 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
 - 補完:
   - `channel-id -> channel_id`
   - `pane-id -> pane_id`
-  - `thread-id -> thread_ts`
+  - `thread-id -> thread_ts`（`1234567890.123456` 形式のみ）
 
 ## 通信方式
 - `NOTIFY_INGRESS_TRANSPORT=http`
@@ -78,6 +78,8 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
     - `NOTIFY_RETRY_TICK_SEC`
 - `NOTIFY_QUEUE_TTL_SEC` 超過は破棄。
 - 再起動後もキューはリプレイされる。
+- `NOTIFY_QUEUE_RESET_ON_START=1` の場合、起動時に `tmp/notify_delivery_queue.json` を空にする。
+- `invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして再試行せず破棄する。
 
 ## 主要エラー
 - `notify payload rejected: ...`
@@ -86,6 +88,8 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
   - ingress 側で `channel_id` を解決できない
 - `notify forwarding failed: http 422 {"error":"thread destination not found"}`
   - ingress 側で `thread_ts` を解決できない（スレッド返信先未確定）
+- `notify payload rejected: inactive session for pane_id`
+  - `pane_id`（または `TMUX_PANE`）が `active_sessions.json` 上で未接続のため reject
 - `notify forwarding failed: ...`
   - ingress 未起動、接続失敗、タイムアウトなど
 

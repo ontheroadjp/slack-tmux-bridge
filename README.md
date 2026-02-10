@@ -74,6 +74,7 @@ cp .env.sample .env
 - `NOTIFY_INGRESS_*` – optional local notify ingress for `slack_tmux_bridge` (`http` localhost-only or `uds`), including payload size and rate-limit settings.
 - `NOTIFY_DEDUPE_TTL_SEC` – retention window for dedupe keys used by `poll/notify` coordination.
 - `NOTIFY_QUEUE_TTL_SEC` / `NOTIFY_RETRY_BASE_SEC` / `NOTIFY_RETRY_MAX_SEC` / `NOTIFY_RETRY_MAX_ATTEMPTS` / `NOTIFY_RETRY_TICK_SEC` – notify delivery queue TTL and retry policy (backoff, max attempts, worker interval).
+- `NOTIFY_QUEUE_RESET_ON_START` – set `1` to clear persisted notify queue on process start.
 - `COMMAND_ALLOWLIST` / `COMMAND_DENYLIST` – comma-separated patterns; include `all` to allow/deny everything. Default behavior blocks `rm` (use `\rm` to bypass).
 
 Command filter notes:

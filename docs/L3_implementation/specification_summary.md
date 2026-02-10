@@ -32,8 +32,8 @@ Evidence:
 - 現在のディレクトリ名を Slack チャンネル名として解決し、見つからない場合は `ai-studio-01/02/03` を順にフォールバックする。根拠: README.md:84-113 / goslack.py:245-260
 - `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py:267-283
 - `list` は番号付きでセッションを出力し、`rm <number>` で削除する。根拠: goslack.py:164-205
-- Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、`channel-id`/`pane-id`/`thread-id` を snake_case キー（`channel_id`/`pane_id`/`thread_ts`）へ不足時のみ補完する。スレッド返信用途では `last-assistant-message` を必須とし、`channel_id`/`thread_ts` は payload 直値または `pane_id` 起点の宛先解決で確定できる必要がある。解決不能なら forwarding 前に reject する。根拠: slack_tmux_bridge.py
-- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id` と `active_sessions.json`/`tmp/notify_context.json` から解決する。`thread_ts` を確定できない payload は reject する。根拠: slack_tmux_bridge.py
+- Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、`channel-id`/`pane-id`/`thread-id` を snake_case キー（`channel_id`/`pane_id`/`thread_ts`）へ不足時のみ補完する（`thread-id` は Slack thread ts 形式のみ補完対象）。スレッド返信用途では `last-assistant-message` を必須とし、`channel_id`/`thread_ts` は payload 直値または `pane_id` 起点の宛先解決で確定できる必要がある。解決不能なら forwarding 前に reject する。根拠: slack_tmux_bridge.py
+- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id`（未指定時は条件付きで `TMUX_PANE`）と `active_sessions.json`/`tmp/notify_context.json` から解決する。`pane_id` が未接続なら reject する。`thread_ts` を確定できない payload は reject する。根拠: slack_tmux_bridge.py
 
 # Slack 受信 → tmux 実行
 - Slack message イベントのみ処理し、未接続チャンネルは無視する。根拠: slack_tmux_bridge.py:892-938
@@ -48,7 +48,7 @@ Evidence:
 # 返信の取り扱い
 - `EXECUTE_RESULT_MODE=poll` は監視スナップショットを投稿し、`notify` は監視投稿を行わない。`both` は notify 優先で、notify が同一 `pane_id/thread_ts` に到達した場合は poll 投稿を抑止する。根拠: slack_tmux_bridge.py, goslack.py
 - `/now` と「▶︎ 実行（Enter）」は tmux 出力の変化を監視し、停止後に出力を返信する（タイムアウト時は継続ボタン）。「👀 Geminiを見る」は単発取得して返信する。根拠: slack_tmux_bridge.py
-- local notify ingress 受信分は配送キューに永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過や試行上限到達時は破棄して失敗理由をログに残す。根拠: slack_tmux_bridge.py
+- local notify ingress 受信分は配送キューに永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過や試行上限到達時は破棄して失敗理由をログに残す。`invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして即時破棄する。`NOTIFY_QUEUE_RESET_ON_START=1` で起動時キュー初期化が可能。根拠: slack_tmux_bridge.py
 - 承認要求が発生した場合の見落としを防ぐため、Enter 送信後に tmux 出力を監視して該当パターンが出たらスレッドに抜粋を投稿する。根拠: slack_tmux_bridge.py:415-460,822-843,947-972
 
 # tmux 入出力制御

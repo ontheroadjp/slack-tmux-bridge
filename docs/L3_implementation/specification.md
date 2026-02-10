@@ -63,6 +63,7 @@
 | `NOTIFY_RETRY_MAX_SEC` | `60` | 再試行待機上限秒数 | 過剰な待機増加を抑えるため |
 | `NOTIFY_RETRY_MAX_ATTEMPTS` | `10` | 再試行最大回数 | 永続失敗時の無限ループを防ぐため |
 | `NOTIFY_RETRY_TICK_SEC` | `1` | キューワーカー周期秒数 | 起動時再処理と通常配送のポーリング間隔を制御するため |
+| `NOTIFY_QUEUE_RESET_ON_START` | `1` | 起動時キュー初期化フラグ | 残骸キューによる再送ノイズを防ぐため |
 | `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---
@@ -116,12 +117,12 @@ python goslack.py rm 4
 ### 4.5 Codex notify 連携
 - Codex CLI の `notify` は外部コマンドに JSON 文字列を 1 引数で渡す。
 - `slack_tmux_bridge.py notify` は受け取った JSON を最小正規化してから、`NOTIFY_INGRESS_TRANSPORT` (`http` / `uds`) に従って `slack_tmux_bridge` notify ingress へ転送する。
-- 正規化ルール: `channel_id` が未指定かつ `channel-id` がある場合は `channel-id -> channel_id`、`pane_id` が未指定かつ `pane-id` がある場合は `pane-id -> pane_id`、`thread_ts` が未指定かつ `thread-id` がある場合は `thread-id -> thread_ts` を補完する（既存 snake_case キーは上書きしない）。
+- 正規化ルール: `channel_id` が未指定かつ `channel-id` がある場合は `channel-id -> channel_id`、`pane_id` が未指定かつ `pane-id` がある場合は `pane-id -> pane_id`、`thread_ts` が未指定かつ `thread-id` がある場合は `thread-id -> thread_ts` を補完する（`1234567890.123456` 形式のみ、既存 snake_case キーは上書きしない）。
 - スレッド返信用途の notify では `last-assistant-message` を必須とし、`channel_id` / `thread_ts` は payload 直値または `pane_id` からの宛先解決（`active_sessions.json` / `tmp/notify_context.json`）で確定できる必要がある。最終的に `channel_id` / `thread_ts` を解決できない場合は reject する。
 - Slack 投稿先の解決と実際の投稿は `slack_tmux_bridge` 側の責務である。
-- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id` を起点に解決する（スレッド返信先が確定しない payload は reject）。
+- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id`（未指定時は条件付きで `TMUX_PANE`）を起点に解決する。`pane_id` 起点の場合は `active_sessions.json` で接続済みであることを必須とする。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
-- `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。
+- `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。`invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして即時破棄する。
 
 ---
 

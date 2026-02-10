@@ -1,18 +1,23 @@
 Status: Draft
-Last updated: 2026-02-04
+Last updated: 2026-02-10
 Evidence:
 - README.md:7-18
 - docs/L2_development/notify_design.md
-- slack_tmux_bridge.py:13-15
-- slack_tmux_bridge.py:32-55
-- slack_tmux_bridge.py:202-219
-- slack_tmux_bridge.py:291-336
-- slack_tmux_bridge.py:531-588
-- slack_tmux_bridge.py:899-1015
-- slack_tmux_bridge.py:1316-1323
-- goslack.py:11-16
-- goslack.py:164-205
-- goslack.py:267-283
+- slack_tmux_bridge.py:39-45
+- slack_tmux_bridge.py:249-272
+- slack_tmux_bridge.py:313-330
+- slack_tmux_bridge.py:588-623
+- slack_tmux_bridge.py:712-754
+- slack_tmux_bridge.py:1616-1655
+- slack_tmux_bridge.py:1657-1695
+- slack_tmux_bridge.py:1725-1743
+- slack_tmux_bridge.py:1945-1981
+- slack_tmux_bridge.py:1986-2007
+- slack_tmux_bridge.py:2087-2281
+- slack_tmux_bridge.py:1485-1560
+- goslack.py:15-18
+- goslack.py:191-231
+- goslack.py:294-313
 - send_enter.sh:1-8
 
 # 全体アーキテクチャ概要
@@ -40,12 +45,37 @@ tmux (Gemini CLI)
 - test/: pytest のテスト群。根拠: test/ 配下
 - tmp/: PID/状態ファイルの保存先。根拠: slack_tmux_bridge.py:35-36,1310-1312 / goslack.py:211-213
 
-# データフロー / リクエストフロー
-1. Slack の message イベントを受信する。根拠: slack_tmux_bridge.py:970-1015
-2. active_sessions.json から channel_id に対応する pane_id を取得する。根拠: slack_tmux_bridge.py:175-206
-3. pane_id から現在の tmux target を再解決する。根拠: slack_tmux_bridge.py:212-219
-4. allowlist/denylist でコマンドを判定する。根拠: slack_tmux_bridge.py:143-187,732-735
-5. 数字は即時実行、テキストはボタンで Enter を送信する。根拠: slack_tmux_bridge.py:899-969
+# Slack入力方式と正規化
+- 入力方式（Slack 側）:
+  - message イベント (`@app.event("message")`)
+  - action: `send_enter`
+  - action: `show_commands`
+  - action: `exec_cmd_*`
+  - action: `delete_prompt`
+  - action: `show_gemini`
+  - action: `continue_now_watch`
+  - action: `continue_execute_watch`
+  - action: `confirm_rebind`
+  - action: `cancel_rebind`
+- 正規化コンテキスト（bridge 内部）:
+  - `source`
+  - `channel_id`
+  - `thread_ts`
+  - `text`
+  - `tmux_target`
+- 正規化関数:
+  - message 経路は `_normalize_message_input` で正規化。
+  - action 経路の主要ハンドラ（`send_enter`, `exec_cmd_*`）は `_normalize_action_input` で正規化。
+  - 一部 action（`show_commands` など）は現状、`body` 直接参照で処理している。
+根拠: slack_tmux_bridge.py:1616-1655,1945-1981,1986-2007,2087-2281
+
+# データフロー / リクエストフロー（共通パイプライン）
+1. Slack 入力を受信し、入力種別に応じてコンテキスト化する。根拠: slack_tmux_bridge.py:1616-1655,1945-1981,1986-2007,2087-2281
+2. `active_sessions.json` から channel_id に対応する pane_id/接続情報を解決する。未接続チャンネルは処理しない。根拠: slack_tmux_bridge.py:249-272,1945-1981
+3. pane_id から現在の tmux target を再解決し、誤送信を防止する。根拠: slack_tmux_bridge.py:249-272
+4. メッセージ入力はコマンド判定と allowlist/denylist 判定を通す。根拠: slack_tmux_bridge.py:1725-1743,1697-1723
+5. tmux 送信処理は `_send_tmux_text_for_context` / `_execute_enter_for_context` に集約し、入力方式に関係なく `channel_id/thread_ts/tmux_target` を保持して送信する。根拠: slack_tmux_bridge.py:1657-1695,1875-1943,1986-2007,2105-2141
+6. 実行後は `EXECUTE_RESULT_MODE` に従って監視投稿（poll）または notify 経路を使ってスレッド返信する。根拠: slack_tmux_bridge.py:1485-1560,588-623,712-754
 
 # エラーハンドリング方針
 - tmux 操作失敗時はログを出し、必要に応じて Slack へ通知する。根拠: slack_tmux_bridge.py:301-330
@@ -53,7 +83,7 @@ tmux (Gemini CLI)
 
 # 設計上のトレードオフ
 - Socket Mode により外部公開不要だが、イベント停止監視が必要。根拠: slack_tmux_bridge.py:542-588,1323
-- 実行結果の投稿を AI エージェントに委譲するため、ブリッジ側は結果投稿を行わない。根拠: slack_tmux_bridge.py:678-683,931-936
+- 実行結果投稿には poll と notify の2経路があるため、`both` 運用では重複抑止（dedupe）が必要。根拠: slack_tmux_bridge.py:1086-1123,1485-1560
 
 # 依存関係境界（レイヤ分割）
 - Slack I/O 層: Slack Bolt / Slack SDK を利用。根拠: slack_tmux_bridge.py:13-15 / requirements.txt:1-3

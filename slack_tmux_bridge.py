@@ -1016,6 +1016,12 @@ LAST_IDLE_NOTIFY_TS_BY_CHANNEL = {}
 LAST_RESTART_TS = 0.0
 PENDING_REBIND_BY_THREAD = {}
 NOTIFY_DEDUPE_LOCK = threading.Lock()
+WATCH_GUARD_LOCK = threading.Lock()
+ACTIVE_WATCHERS = {
+    "permission": set(),
+    "now": set(),
+    "execute": set(),
+}
 
 def _atomic_write_json(path: str, data):
     dir_name = os.path.dirname(path)
@@ -1222,9 +1228,24 @@ def _watch_permission_prompt(thread_ts: str, channel_id: str, tmux_target: str):
 def _start_permission_watch(thread_ts: str, channel_id: str, tmux_target: str):
     if PERMISSION_WATCH_SEC <= 0:
         return
+    if not thread_ts:
+        return
+    with WATCH_GUARD_LOCK:
+        active = ACTIVE_WATCHERS["permission"]
+        if thread_ts in active:
+            log(f"skip duplicate permission watch thread_ts={thread_ts}")
+            return
+        active.add(thread_ts)
+
+    def _runner():
+        try:
+            _watch_permission_prompt(thread_ts, channel_id, tmux_target)
+        finally:
+            with WATCH_GUARD_LOCK:
+                ACTIVE_WATCHERS["permission"].discard(thread_ts)
+
     watcher = threading.Thread(
-        target=_watch_permission_prompt,
-        args=(thread_ts, channel_id, tmux_target),
+        target=_runner,
         daemon=True,
     )
     watcher.start()
@@ -1283,9 +1304,24 @@ def _watch_now_output(thread_ts: str, channel_id: str, tmux_target: str):
             return
 
 def _start_now_watch(thread_ts: str, channel_id: str, tmux_target: str):
+    if not thread_ts:
+        return
+    with WATCH_GUARD_LOCK:
+        active = ACTIVE_WATCHERS["now"]
+        if thread_ts in active:
+            log(f"skip duplicate now watch thread_ts={thread_ts}")
+            return
+        active.add(thread_ts)
+
+    def _runner():
+        try:
+            _watch_now_output(thread_ts, channel_id, tmux_target)
+        finally:
+            with WATCH_GUARD_LOCK:
+                ACTIVE_WATCHERS["now"].discard(thread_ts)
+
     watcher = threading.Thread(
-        target=_watch_now_output,
-        args=(thread_ts, channel_id, tmux_target),
+        target=_runner,
         daemon=True,
     )
     watcher.start()
@@ -1344,9 +1380,24 @@ def _watch_execute_output(thread_ts: str, channel_id: str, tmux_target: str):
             return
 
 def _start_execute_watch(thread_ts: str, channel_id: str, tmux_target: str):
+    if not thread_ts:
+        return
+    with WATCH_GUARD_LOCK:
+        active = ACTIVE_WATCHERS["execute"]
+        if thread_ts in active:
+            log(f"skip duplicate execute watch thread_ts={thread_ts}")
+            return
+        active.add(thread_ts)
+
+    def _runner():
+        try:
+            _watch_execute_output(thread_ts, channel_id, tmux_target)
+        finally:
+            with WATCH_GUARD_LOCK:
+                ACTIVE_WATCHERS["execute"].discard(thread_ts)
+
     watcher = threading.Thread(
-        target=_watch_execute_output,
-        args=(thread_ts, channel_id, tmux_target),
+        target=_runner,
         daemon=True,
     )
     watcher.start()

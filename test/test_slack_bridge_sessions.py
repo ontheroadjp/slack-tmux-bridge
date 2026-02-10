@@ -770,6 +770,78 @@ def test_send_enter_starts_poll_watch_when_execute_mode_poll(monkeypatch):
     assert called["execute_watch"] == 1
 
 
+def test_execute_watch_dedup_by_thread_ts(monkeypatch):
+    monkeypatch.setattr(stb, "ACTIVE_WATCHERS", {"permission": set(), "now": set(), "execute": set()})
+    monkeypatch.setattr(stb, "_watch_execute_output", lambda *_args, **_kwargs: None)
+
+    started = []
+
+    class _DummyThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            started.append(self._target)
+
+    monkeypatch.setattr(stb.threading, "Thread", _DummyThread)
+
+    stb._start_execute_watch("123.456", "C1", "1:1.0")
+    stb._start_execute_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 1
+
+    started[0]()
+    stb._start_execute_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 2
+
+
+def test_now_watch_dedup_by_thread_ts(monkeypatch):
+    monkeypatch.setattr(stb, "ACTIVE_WATCHERS", {"permission": set(), "now": set(), "execute": set()})
+    monkeypatch.setattr(stb, "_watch_now_output", lambda *_args, **_kwargs: None)
+
+    started = []
+
+    class _DummyThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            started.append(self._target)
+
+    monkeypatch.setattr(stb.threading, "Thread", _DummyThread)
+
+    stb._start_now_watch("123.456", "C1", "1:1.0")
+    stb._start_now_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 1
+
+    started[0]()
+    stb._start_now_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 2
+
+
+def test_permission_watch_dedup_by_thread_ts(monkeypatch):
+    monkeypatch.setattr(stb, "ACTIVE_WATCHERS", {"permission": set(), "now": set(), "execute": set()})
+    monkeypatch.setattr(stb, "_watch_permission_prompt", lambda *_args, **_kwargs: None)
+
+    started = []
+
+    class _DummyThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            started.append(self._target)
+
+    monkeypatch.setattr(stb.threading, "Thread", _DummyThread)
+
+    stb._start_permission_watch("123.456", "C1", "1:1.0")
+    stb._start_permission_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 1
+
+    started[0]()
+    stb._start_permission_watch("123.456", "C1", "1:1.0")
+    assert len(started) == 2
+
+
 def test_slash_command_records_notify_context(monkeypatch):
     called = {"record": 0}
 

@@ -189,6 +189,7 @@ python goslack.py rm 4
 - 連続 `NOW_WATCH_IDLE_COUNT` 回変化がなければ、`tmux capture-pane` で取得して返信する。
 - 変化が `NOW_WATCH_TIMEOUT_SEC` を超えて続く場合はタイムアウトを通知し、「監視を継続」ボタンを提示する。
 - 実行ボタンは `EXECUTE_RESULT_MODE` が `poll` または `both` の場合のみ、Enter 送信後に監視する。`both` では notify 優先で重複排除を行い、notify が観測されない場合のみ poll スナップショットを投稿する。
+- `permission` / `/now` / `execute` の各監視は、同一 `thread_ts` で同種監視が起動中の場合は重複起動を抑止する。
 
 ### 7.2 抽出ロジック
 1. `"> prompt"` 行を探し、その行以降のみ採用。

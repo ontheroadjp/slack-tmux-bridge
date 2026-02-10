@@ -123,6 +123,7 @@ python goslack.py rm 4
 - notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id`（未指定時は条件付きで `TMUX_PANE`）を起点に解決する。`pane_id` 起点の場合は `active_sessions.json` で接続済みであることを必須とする。
 - `notify` は `/now` のポーリング挙動を変更しない。実行ボタンの監視有無は `EXECUTE_RESULT_MODE` に従う。
 - `slack_tmux_bridge` の local notify ingress を使う場合、受信 payload は `tmp/notify_delivery_queue.json` に永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過または試行上限到達で破棄し、失敗理由をログに残す。`invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして即時破棄する。
+- notify 配送ワーカーは、キューの走査・対象抽出と結果反映をロック内で行い、Slack 投稿（外部I/O）はロック外で実行する。
 
 ---
 

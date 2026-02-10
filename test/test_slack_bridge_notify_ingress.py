@@ -236,6 +236,45 @@ def test_process_notify_queue_retries_and_succeeds(tmp_path, monkeypatch):
     assert state["items"] == []
 
 
+def test_process_notify_queue_posts_outside_queue_lock(tmp_path, monkeypatch):
+    _reset_ingress_state()
+    queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
+    monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
+
+    now = time.time()
+    stb._save_notify_queue(
+        {
+            "items": [
+                {
+                    "channel_id": "C1",
+                    "thread_ts": "123.456",
+                    "pane_id": "%1",
+                    "turn_id": "turn-1",
+                    "text": "hello",
+                    "source": "http",
+                    "created_at": now,
+                    "next_attempt_at": now,
+                    "attempts": 0,
+                    "last_error": "",
+                }
+            ]
+        }
+    )
+
+    lock_state = {"locked_during_post": None}
+
+    def _post_result(*_args, **_kwargs):
+        lock_state["locked_during_post"] = stb.NOTIFY_QUEUE_LOCK.locked()
+        return True, ""
+
+    monkeypatch.setattr(stb, "_post_message_with_result", _post_result)
+    monkeypatch.setattr(stb, "_record_notify_delivery_event", lambda *_args, **_kwargs: None)
+
+    stb._process_notify_queue_once(now_ts=now)
+    assert lock_state["locked_during_post"] is False
+    assert stb._load_notify_queue()["items"] == []
+
+
 def test_process_notify_queue_drops_ttl(tmp_path, monkeypatch):
     _reset_ingress_state()
     queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"

@@ -367,11 +367,22 @@ def _calc_retry_delay(attempt: int) -> float:
     delay = base * (2 ** max(attempt - 1, 0))
     return min(delay, max_delay)
 
+def _ensure_notify_item_id(item: dict):
+    if not isinstance(item, dict):
+        return None
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.strip():
+        return item_id
+    item_id = f"{time.time_ns()}-{os.getpid()}"
+    item["id"] = item_id
+    return item_id
+
 def _enqueue_notify_message(item: dict):
     now_ts = time.time()
     with NOTIFY_QUEUE_LOCK:
         state = _load_notify_queue()
         items = state.setdefault("items", [])
+        _ensure_notify_item_id(item)
         items.append(item)
         _save_notify_queue(state)
         NOTIFY_DELIVERY_STATE["enqueued"] += 1
@@ -406,70 +417,145 @@ def _is_permanent_slack_post_error(error: str) -> bool:
     ]
     return any(code in error for code in permanent_codes)
 
-def _process_notify_queue_once(now_ts=None):
-    now_ts = now_ts if now_ts is not None else time.time()
+def _collect_due_notify_items(now_ts):
+    due_items = []
+    changed = False
     with NOTIFY_QUEUE_LOCK:
         state = _load_notify_queue()
         items = state.get("items", [])
         if not isinstance(items, list):
-            state = {"items": []}
-            _save_notify_queue(state)
-            return
+            _save_notify_queue({"items": []})
+            return []
 
         kept = []
         for item in items:
             if not isinstance(item, dict):
+                changed = True
                 continue
+            had_item_id = isinstance(item.get("id"), str) and bool(item.get("id"))
+            if not _ensure_notify_item_id(item):
+                changed = True
+                continue
+            if not had_item_id:
+                changed = True
+
             created_at = item.get("created_at")
             if not isinstance(created_at, (int, float)):
                 _drop_notify_item("invalid_created_at", item)
+                changed = True
                 continue
             if now_ts - created_at > max(NOTIFY_QUEUE_TTL_SEC, 1):
                 _drop_notify_item("ttl", item)
+                changed = True
                 continue
 
             next_attempt_at = item.get("next_attempt_at", created_at)
-            if isinstance(next_attempt_at, (int, float)) and next_attempt_at > now_ts:
+            if isinstance(next_attempt_at, (int, float)) and next_attempt_at <= now_ts:
+                due_items.append(dict(item))
+            kept.append(item)
+
+        if changed or len(kept) != len(items):
+            state["items"] = kept
+            _save_notify_queue(state)
+    return due_items
+
+def _apply_notify_delivery_results(results_by_id: dict):
+    if not isinstance(results_by_id, dict) or not results_by_id:
+        return
+    with NOTIFY_QUEUE_LOCK:
+        state = _load_notify_queue()
+        items = state.get("items", [])
+        if not isinstance(items, list):
+            _save_notify_queue({"items": []})
+            return
+
+        kept = []
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                changed = True
+                continue
+            had_item_id = isinstance(item.get("id"), str) and bool(item.get("id"))
+            item_id = _ensure_notify_item_id(item)
+            if not had_item_id:
+                changed = True
+            result = results_by_id.get(item_id)
+            if not isinstance(result, dict):
                 kept.append(item)
                 continue
 
-            channel_id = item.get("channel_id")
-            thread_ts = item.get("thread_ts")
-            text = item.get("text")
-            pane_id = item.get("pane_id")
-            turn_id = item.get("turn_id")
-            attempts = int(item.get("attempts", 0))
-
-            ok, error = _post_message_with_result(channel_id, text, thread_ts=thread_ts)
-            if ok:
-                NOTIFY_DELIVERY_STATE["sent"] += 1
-                NOTIFY_DELIVERY_STATE["last_error"] = None
-                if pane_id:
-                    _record_notify_delivery_event(pane_id, thread_ts, source="notify", turn_id=turn_id)
+            action = result.get("action")
+            if action in ("sent", "drop"):
+                changed = True
                 continue
-
-            attempts += 1
-            item["attempts"] = attempts
-            item["last_error"] = error
-            item["last_attempt_at"] = now_ts
-            NOTIFY_DELIVERY_STATE["last_error"] = error
-            if _is_permanent_slack_post_error(error):
-                _drop_notify_item("permanent_post_error", item)
+            if action == "retry":
+                updates = result.get("updates", {})
+                if isinstance(updates, dict):
+                    item.update(updates)
+                kept.append(item)
+                changed = True
                 continue
-            if NOTIFY_RETRY_MAX_ATTEMPTS > 0 and attempts >= NOTIFY_RETRY_MAX_ATTEMPTS:
-                _drop_notify_item("max_attempts", item)
-                continue
-            delay = _calc_retry_delay(attempts)
-            item["next_attempt_at"] = now_ts + delay
             kept.append(item)
-            log(
-                "notify delivery retry scheduled"
-                f" attempts={attempts} delay={delay}s"
-                f" channel={channel_id} thread_ts={thread_ts} error={error}"
-            )
 
-        state["items"] = kept
-        _save_notify_queue(state)
+        if changed or len(kept) != len(items):
+            state["items"] = kept
+            _save_notify_queue(state)
+
+def _process_notify_queue_once(now_ts=None):
+    now_ts = now_ts if now_ts is not None else time.time()
+    due_items = _collect_due_notify_items(now_ts)
+    if not due_items:
+        return
+
+    results_by_id = {}
+    for item in due_items:
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        channel_id = item.get("channel_id")
+        thread_ts = item.get("thread_ts")
+        text = item.get("text")
+        pane_id = item.get("pane_id")
+        turn_id = item.get("turn_id")
+        attempts = int(item.get("attempts", 0))
+
+        ok, error = _post_message_with_result(channel_id, text, thread_ts=thread_ts)
+        if ok:
+            NOTIFY_DELIVERY_STATE["sent"] += 1
+            NOTIFY_DELIVERY_STATE["last_error"] = None
+            if pane_id:
+                _record_notify_delivery_event(pane_id, thread_ts, source="notify", turn_id=turn_id)
+            results_by_id[item_id] = {"action": "sent"}
+            continue
+
+        attempts += 1
+        NOTIFY_DELIVERY_STATE["last_error"] = error
+        if _is_permanent_slack_post_error(error):
+            _drop_notify_item("permanent_post_error", item)
+            results_by_id[item_id] = {"action": "drop"}
+            continue
+        if NOTIFY_RETRY_MAX_ATTEMPTS > 0 and attempts >= NOTIFY_RETRY_MAX_ATTEMPTS:
+            _drop_notify_item("max_attempts", item)
+            results_by_id[item_id] = {"action": "drop"}
+            continue
+
+        delay = _calc_retry_delay(attempts)
+        log(
+            "notify delivery retry scheduled"
+            f" attempts={attempts} delay={delay}s"
+            f" channel={channel_id} thread_ts={thread_ts} error={error}"
+        )
+        results_by_id[item_id] = {
+            "action": "retry",
+            "updates": {
+                "attempts": attempts,
+                "last_error": error,
+                "last_attempt_at": now_ts,
+                "next_attempt_at": now_ts + delay,
+            },
+        }
+
+    _apply_notify_delivery_results(results_by_id)
 
 def _notify_delivery_worker():
     # Startup replay: process persisted queue as soon as worker starts.
@@ -488,6 +574,19 @@ def _read_notify_payload_arg(arg_payload: str) -> str:
     data = sys.stdin.read()
     return data.strip() if data else ""
 
+def _parse_notify_forward_response(body: str, source: str):
+    if not body:
+        return False, f"{source} response empty"
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False, f"{source} response is not json: {body}"
+    if not isinstance(payload, dict):
+        return False, f"{source} response is not object"
+    if payload.get("ok") is True:
+        return True, ""
+    return False, payload.get("error") or f"{source} ingress rejected payload"
+
 def _forward_notify_payload_http(raw_payload: str):
     url = f"http://{NOTIFY_HTTP_HOST}:{NOTIFY_HTTP_PORT}{NOTIFY_HTTP_PATH}"
     req = urllib.request.Request(
@@ -504,17 +603,7 @@ def _forward_notify_payload_http(raw_payload: str):
         return False, f"http {exc.code}: {body}"
     except Exception as exc:
         return False, f"http request failed: {exc}"
-    if not body:
-        return False, "http response empty"
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return False, f"http response is not json: {body}"
-    if not isinstance(payload, dict):
-        return False, "http response is not object"
-    if payload.get("ok") is True:
-        return True, ""
-    return False, payload.get("error") or "http ingress rejected payload"
+    return _parse_notify_forward_response(body, "http")
 
 def _forward_notify_payload_uds(raw_payload: str):
     try:
@@ -526,17 +615,7 @@ def _forward_notify_payload_uds(raw_payload: str):
         sock.close()
     except Exception as exc:
         return False, f"uds request failed: {exc}"
-    if not response:
-        return False, "uds response empty"
-    try:
-        payload = json.loads(response)
-    except json.JSONDecodeError:
-        return False, f"uds response is not json: {response}"
-    if not isinstance(payload, dict):
-        return False, "uds response is not object"
-    if payload.get("ok") is True:
-        return True, ""
-    return False, payload.get("error") or "uds ingress rejected payload"
+    return _parse_notify_forward_response(response, "uds")
 
 def _forward_notify_payload(raw_payload: str):
     transport = NOTIFY_INGRESS_TRANSPORT

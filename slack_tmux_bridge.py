@@ -1285,6 +1285,100 @@ def _post_permission_prompt(channel_id: str, thread_ts: str, content: str):
         thread_ts=thread_ts,
     )
 
+def _build_continue_watch_blocks(action_id: str):
+    return [
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "監視を継続"},
+                    "action_id": action_id,
+                }
+            ],
+        }
+    ]
+
+def _start_guarded_watch(kind: str, thread_ts: str, runner):
+    if not thread_ts:
+        return
+    with WATCH_GUARD_LOCK:
+        active = ACTIVE_WATCHERS[kind]
+        if thread_ts in active:
+            log(f"skip duplicate {kind} watch thread_ts={thread_ts}")
+            return
+        active.add(thread_ts)
+
+    def _wrapped_runner():
+        try:
+            runner()
+        finally:
+            with WATCH_GUARD_LOCK:
+                ACTIVE_WATCHERS[kind].discard(thread_ts)
+
+    watcher = threading.Thread(
+        target=_wrapped_runner,
+        daemon=True,
+    )
+    watcher.start()
+
+def _watch_output_until_idle(
+    thread_ts: str,
+    channel_id: str,
+    tmux_target: str,
+    *,
+    capture_reason: str,
+    timeout_message: str,
+    continue_action_id: str,
+    log_prefix: str,
+):
+    def _capture_once():
+        if capture_reason == "generic":
+            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
+            return
+        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "", reason=capture_reason)
+
+    if not thread_ts or not channel_id or not tmux_target:
+        return
+    if NOW_WATCH_INTERVAL_SEC <= 0 or NOW_WATCH_IDLE_COUNT <= 0 or NOW_WATCH_TIMEOUT_SEC <= 0:
+        _capture_once()
+        return
+
+    start_ts = time.time()
+    idle_count = 0
+    try:
+        last_content = strip_ansi(capture_tmux(tmux_target, lines=True))
+    except Exception as e:
+        log(f"{log_prefix} watch capture failed: {e}")
+        last_content = ""
+
+    while True:
+        if time.time() - start_ts >= NOW_WATCH_TIMEOUT_SEC:
+            _post_message(
+                channel_id,
+                timeout_message,
+                thread_ts=thread_ts,
+                blocks=_build_continue_watch_blocks(continue_action_id),
+            )
+            return
+
+        time.sleep(NOW_WATCH_INTERVAL_SEC)
+        try:
+            current_content = strip_ansi(capture_tmux(tmux_target, lines=True))
+        except Exception as e:
+            log(f"{log_prefix} watch capture failed: {e}")
+            current_content = last_content
+
+        if current_content != last_content:
+            last_content = current_content
+            idle_count = 0
+            continue
+
+        idle_count += 1
+        if idle_count >= NOW_WATCH_IDLE_COUNT:
+            _capture_once()
+            return
+
 def _watch_permission_prompt(thread_ts: str, channel_id: str, tmux_target: str):
     if PERMISSION_WATCH_SEC <= 0:
         return
@@ -1307,179 +1401,47 @@ def _watch_permission_prompt(thread_ts: str, channel_id: str, tmux_target: str):
 def _start_permission_watch(thread_ts: str, channel_id: str, tmux_target: str):
     if PERMISSION_WATCH_SEC <= 0:
         return
-    if not thread_ts:
-        return
-    with WATCH_GUARD_LOCK:
-        active = ACTIVE_WATCHERS["permission"]
-        if thread_ts in active:
-            log(f"skip duplicate permission watch thread_ts={thread_ts}")
-            return
-        active.add(thread_ts)
-
-    def _runner():
-        try:
-            _watch_permission_prompt(thread_ts, channel_id, tmux_target)
-        finally:
-            with WATCH_GUARD_LOCK:
-                ACTIVE_WATCHERS["permission"].discard(thread_ts)
-
-    watcher = threading.Thread(
-        target=_runner,
-        daemon=True,
+    _start_guarded_watch(
+        "permission",
+        thread_ts,
+        lambda: _watch_permission_prompt(thread_ts, channel_id, tmux_target),
     )
-    watcher.start()
 
 def _watch_now_output(thread_ts: str, channel_id: str, tmux_target: str):
-    if not thread_ts or not channel_id or not tmux_target:
-        return
-    if NOW_WATCH_INTERVAL_SEC <= 0 or NOW_WATCH_IDLE_COUNT <= 0 or NOW_WATCH_TIMEOUT_SEC <= 0:
-        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
-        return
-
-    start_ts = time.time()
-    idle_count = 0
-    try:
-        last_content = strip_ansi(capture_tmux(tmux_target, lines=True))
-    except Exception as e:
-        log(f"/now watch capture failed: {e}")
-        last_content = ""
-
-    while True:
-        if time.time() - start_ts >= NOW_WATCH_TIMEOUT_SEC:
-            _post_message(
-                channel_id,
-                "⏳ 監視がタイムアウトしました。続けますか？",
-                thread_ts=thread_ts,
-                blocks=[
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "監視を継続"},
-                                "action_id": "continue_now_watch",
-                            }
-                        ],
-                    }
-                ],
-            )
-            return
-
-        time.sleep(NOW_WATCH_INTERVAL_SEC)
-        try:
-            current_content = strip_ansi(capture_tmux(tmux_target, lines=True))
-        except Exception as e:
-            log(f"/now watch capture failed: {e}")
-            current_content = last_content
-
-        if current_content != last_content:
-            last_content = current_content
-            idle_count = 0
-            continue
-
-        idle_count += 1
-        if idle_count >= NOW_WATCH_IDLE_COUNT:
-            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "")
-            return
+    _watch_output_until_idle(
+        thread_ts,
+        channel_id,
+        tmux_target,
+        capture_reason="generic",
+        timeout_message="⏳ 監視がタイムアウトしました。続けますか？",
+        continue_action_id="continue_now_watch",
+        log_prefix="/now",
+    )
 
 def _start_now_watch(thread_ts: str, channel_id: str, tmux_target: str):
-    if not thread_ts:
-        return
-    with WATCH_GUARD_LOCK:
-        active = ACTIVE_WATCHERS["now"]
-        if thread_ts in active:
-            log(f"skip duplicate now watch thread_ts={thread_ts}")
-            return
-        active.add(thread_ts)
-
-    def _runner():
-        try:
-            _watch_now_output(thread_ts, channel_id, tmux_target)
-        finally:
-            with WATCH_GUARD_LOCK:
-                ACTIVE_WATCHERS["now"].discard(thread_ts)
-
-    watcher = threading.Thread(
-        target=_runner,
-        daemon=True,
+    _start_guarded_watch(
+        "now",
+        thread_ts,
+        lambda: _watch_now_output(thread_ts, channel_id, tmux_target),
     )
-    watcher.start()
 
 def _watch_execute_output(thread_ts: str, channel_id: str, tmux_target: str):
-    if not thread_ts or not channel_id or not tmux_target:
-        return
-    if NOW_WATCH_INTERVAL_SEC <= 0 or NOW_WATCH_IDLE_COUNT <= 0 or NOW_WATCH_TIMEOUT_SEC <= 0:
-        _capture_and_reply_once(thread_ts, channel_id, tmux_target, "", reason="execute")
-        return
-
-    start_ts = time.time()
-    idle_count = 0
-    try:
-        last_content = strip_ansi(capture_tmux(tmux_target, lines=True))
-    except Exception as e:
-        log(f"execute watch capture failed: {e}")
-        last_content = ""
-
-    while True:
-        if time.time() - start_ts >= NOW_WATCH_TIMEOUT_SEC:
-            _post_message(
-                channel_id,
-                "タイムアウトしました。監視を継続しますか？",
-                thread_ts=thread_ts,
-                blocks=[
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "監視を継続"},
-                                "action_id": "continue_execute_watch",
-                            }
-                        ],
-                    }
-                ],
-            )
-            return
-
-        time.sleep(NOW_WATCH_INTERVAL_SEC)
-        try:
-            current_content = strip_ansi(capture_tmux(tmux_target, lines=True))
-        except Exception as e:
-            log(f"execute watch capture failed: {e}")
-            current_content = last_content
-
-        if current_content != last_content:
-            last_content = current_content
-            idle_count = 0
-            continue
-
-        idle_count += 1
-        if idle_count >= NOW_WATCH_IDLE_COUNT:
-            _capture_and_reply_once(thread_ts, channel_id, tmux_target, "", reason="execute")
-            return
+    _watch_output_until_idle(
+        thread_ts,
+        channel_id,
+        tmux_target,
+        capture_reason="execute",
+        timeout_message="タイムアウトしました。監視を継続しますか？",
+        continue_action_id="continue_execute_watch",
+        log_prefix="execute",
+    )
 
 def _start_execute_watch(thread_ts: str, channel_id: str, tmux_target: str):
-    if not thread_ts:
-        return
-    with WATCH_GUARD_LOCK:
-        active = ACTIVE_WATCHERS["execute"]
-        if thread_ts in active:
-            log(f"skip duplicate execute watch thread_ts={thread_ts}")
-            return
-        active.add(thread_ts)
-
-    def _runner():
-        try:
-            _watch_execute_output(thread_ts, channel_id, tmux_target)
-        finally:
-            with WATCH_GUARD_LOCK:
-                ACTIVE_WATCHERS["execute"].discard(thread_ts)
-
-    watcher = threading.Thread(
-        target=_runner,
-        daemon=True,
+    _start_guarded_watch(
+        "execute",
+        thread_ts,
+        lambda: _watch_execute_output(thread_ts, channel_id, tmux_target),
     )
-    watcher.start()
 
 def _build_sessions_output():
     sessions = _get_sessions()

@@ -78,7 +78,7 @@ command = ["python", "/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.p
     - `NOTIFY_RETRY_TICK_SEC`
 - `NOTIFY_QUEUE_TTL_SEC` 超過は破棄。
 - 再起動後もキューはリプレイされる。
-- `NOTIFY_QUEUE_RESET_ON_START=1` の場合、起動時に `tmp/notify_delivery_queue.json` を空にする。
+- `NOTIFY_QUEUE_RESET_ON_START=1` を設定した場合、起動時に `tmp/notify_delivery_queue.json` を空にする。既定値は `0`。
 - `invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして再試行せず破棄する。
 
 ## 主要エラー

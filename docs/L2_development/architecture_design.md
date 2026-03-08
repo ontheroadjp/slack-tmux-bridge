@@ -42,7 +42,7 @@ tmux (Gemini CLI)
 # ディレクトリ構成の意図
 - docs/: プロジェクト設計・仕様ドキュメント。根拠: docs/ 配下
 - launchd/: macOS launchd 用の補助スクリプト/設定。根拠: README.md:123-170 / launchd/ 配下
-- test/: pytest のテスト群。根拠: test/ 配下
+- tests/: pytest のテスト群。根拠: tests/ 配下
 - tmp/: PID/状態ファイルの保存先。根拠: slack_tmux_bridge.py:35-36,1310-1312 / goslack.py:211-213
 
 # Slack入力方式と正規化

@@ -63,7 +63,7 @@
 | `NOTIFY_RETRY_MAX_SEC` | `60` | 再試行待機上限秒数 | 過剰な待機増加を抑えるため |
 | `NOTIFY_RETRY_MAX_ATTEMPTS` | `10` | 再試行最大回数 | 永続失敗時の無限ループを防ぐため |
 | `NOTIFY_RETRY_TICK_SEC` | `1` | キューワーカー周期秒数 | 起動時再処理と通常配送のポーリング間隔を制御するため |
-| `NOTIFY_QUEUE_RESET_ON_START` | `1` | 起動時キュー初期化フラグ | 残骸キューによる再送ノイズを防ぐため |
+| `NOTIFY_QUEUE_RESET_ON_START` | `0` | 起動時キュー初期化フラグ | 必要時のみ残骸キューを明示的に破棄できるようにするため |
 | `TMUX_BIN` | 省略時 `tmux` | tmux の絶対パス | PATH に tmux が無い場合（launchd など）に必要 |
 
 ---

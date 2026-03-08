@@ -66,12 +66,12 @@ Evidence:
 | `./scripts/test_now.sh` | `/now` 監視テストの短縮実行 | scripts/test_now.sh:1-20 |
 
 # テスト/リント/フォーマット手順
-- テスト: `pytest`。根拠: requirements-dev.txt:1 / test/ 配下
+- テスト: `pytest`。根拠: requirements-dev.txt:1 / tests/ 配下
 - リント/フォーマット: 設定ファイルは未確認。根拠: リポジトリ内に該当設定なし
 
 # デバッグ方法
 - `LOG_LEVEL=DEBUG` で Slack SDK/Bolt の詳細ログを出す。根拠: README.md:206 / slack_tmux_bridge.py:60-71
-- `/now` で現在の tmux 出力を単発取得する。根拠: README.md:215 / slack_tmux_bridge.py:674-681,787-800
+- `/now` で現在の tmux 出力変化を監視し、停止後に取得結果を返信する。根拠: README.md:221 / slack_tmux_bridge.py
 - notify（Codex 連携）の payload 契約・失敗時挙動は `docs/L2_development/notify_design.md` を参照。根拠: docs/L2_development/notify_design.md
 
 # macOS launchd での常駐運用

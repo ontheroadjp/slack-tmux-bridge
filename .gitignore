@@ -62,3 +62,4 @@ tmp/
 
 # Project-specific
 active_sessions.json
+.claude/

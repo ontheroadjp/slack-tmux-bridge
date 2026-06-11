@@ -1623,10 +1623,10 @@ def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt="", reaso
     chunk_size = 3000
     if len(msg_text) <= chunk_size:
         # スマホ対策：長い区切り線を短縮
-        msg_text = re.sub(r"(-{20,})", "-" * 20, msg_text)
-        msg_text = re.sub(r"(={20,})", "=" * 20, msg_text)
-        msg_text = re.sub(r"(─{20,})", "─" * 20, msg_text)
-        msg_text = re.sub(r"(═{20,})", "═" * 20, msg_text)
+        msg_text = re.sub(r"(-{8,})", "-" * 8, msg_text)
+        msg_text = re.sub(r"(={8,})", "=" * 8, msg_text)
+        msg_text = re.sub(r"(─{8,})", "─" * 8, msg_text)
+        msg_text = re.sub(r"(═{8,})", "═" * 8, msg_text)
 
         _post_message(
             channel_id,
@@ -1636,10 +1636,10 @@ def _capture_and_reply_once(thread_ts, channel_id, tmux_target, prompt="", reaso
     else:
         for i in range(0, len(msg_text), chunk_size):
             chunk = msg_text[i:i + chunk_size]
-            chunk = re.sub(r"(-{20,})", "-" * 20, chunk)
-            chunk = re.sub(r"(={20,})", "=" * 20, chunk)
-            chunk = re.sub(r"(─{20,})", "─" * 20, chunk)
-            chunk = re.sub(r"(═{20,})", "═" * 20, chunk)
+            chunk = re.sub(r"(-{8,})", "-" * 8, chunk)
+            chunk = re.sub(r"(={8,})", "=" * 8, chunk)
+            chunk = re.sub(r"(─{8,})", "─" * 8, chunk)
+            chunk = re.sub(r"(═{8,})", "═" * 8, chunk)
 
             _post_message(
                 channel_id,

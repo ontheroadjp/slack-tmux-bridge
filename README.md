@@ -239,7 +239,7 @@ python slack_tmux_bridge.py
 - `_event_health_worker` watches for `EVENT_HEALTH_TIMEOUT` seconds of no events and either logs, exits, restarts, or notifies channels.
 - Set `EVENT_HEALTH_NOTIFY=1` to post warnings per channel when they go silent; `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` throttles repeats.
 - Restart actions respect `EVENT_HEALTH_RESTART_COOLDOWN_SEC` to avoid rapid loops.
-- Set `CHANNEL_IDLE_NOTIFY_SEC` to post periodic “idle” pings per channel.
+- `CHANNEL_IDLE_NOTIFY_SEC` is disabled by default (`0`); set a positive value (e.g. `1800`) to post periodic “idle” pings per channel.
 
 ## Deployment tiers
 

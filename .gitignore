@@ -1,10 +1,62 @@
+# OS
 .DS_Store
+Thumbs.db
+
+# Backup files
 bk_*
 
+# Environment
 .env
-active_sessions.json
+.env.*
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+MANIFEST
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pyright/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Runtime files
+*.pid
 tmp/
-__pycache__
-venv
-bot.log
-tmp/slack_tmux_bridge.pid
+
+# Project-specific
+active_sessions.json

@@ -8,6 +8,8 @@ bk_*
 # Environment
 .env
 .env.*
+!*.sample
+!*.example
 
 # Python cache & bytecode
 __pycache__/

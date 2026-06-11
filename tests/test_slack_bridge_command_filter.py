@@ -1,6 +1,6 @@
 import os
 
-os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test")
+os.environ.setdefault("SLACK_BOT_TOKEN", "xxxx-xxxx")
 os.environ.setdefault("SLACK_APP_TOKEN", "xapp-test")
 
 import slack_tmux_bridge as stb

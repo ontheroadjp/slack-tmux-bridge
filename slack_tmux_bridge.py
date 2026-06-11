@@ -78,7 +78,7 @@ EVENT_HEALTH_RESTART_COOLDOWN_SEC = int(os.environ.get("EVENT_HEALTH_RESTART_COO
 EVENT_HEALTH_NOTIFY = os.environ.get("EVENT_HEALTH_NOTIFY", "0") == "1"
 EVENT_HEALTH_NOTIFY_COOLDOWN_SEC = int(os.environ.get("EVENT_HEALTH_NOTIFY_COOLDOWN_SEC", "600"))
 PROMPT_CACHE_TTL_SEC = int(os.environ.get("PROMPT_CACHE_TTL_SEC", "3600"))
-CHANNEL_IDLE_NOTIFY_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_SEC", "1800"))
+CHANNEL_IDLE_NOTIFY_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_SEC", "0"))
 CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC = int(os.environ.get("CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC", "1800"))
 # Permission prompt watch (best-effort capture for approval requests)
 PERMISSION_WATCH_SEC = int(os.environ.get("PERMISSION_WATCH_SEC", "120"))
@@ -301,8 +301,8 @@ def _is_token_verification_enabled() -> bool:
     value = os.environ.get("SLACK_TOKEN_VERIFICATION_ENABLED")
     if value is not None:
         return value == "1"
-    # Test suite uses "xoxb-test" dummy token; skip auth.test in that case.
-    return not (SLACK_BOT_TOKEN or "").startswith("xoxb-test")
+    # Test suite uses "xxxx-xxxx" dummy token; skip auth.test in that case.
+    return not (SLACK_BOT_TOKEN or "").startswith("xxxx-xxxx")
 
 app = App(
     token=SLACK_BOT_TOKEN,

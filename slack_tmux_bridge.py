@@ -1993,7 +1993,7 @@ def _handle_text_message(channel_id: str, thread_ts: str, tmux_target: str, text
         tmux_target=tmux_target,
     )
     # ① 文字だけ tmux に送る
-    _send_tmux_text_for_context(ctx, text)
+    _send_tmux_text_for_context(ctx, text, pre_clear=True)
 
     # ② 同じメッセージのスレッドに操作ボタンを出す
     _post_message(
@@ -2096,7 +2096,7 @@ def handle_send_enter(ack, body):
         thread_ts=thread_ts,
     )
 
-    _execute_enter_for_context(ctx, pre_clear=True, start_execute_watch=True)
+    _execute_enter_for_context(ctx, pre_clear=False, start_execute_watch=True)
 
 # =====================
 # =====================

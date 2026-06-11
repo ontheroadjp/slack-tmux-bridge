@@ -48,7 +48,7 @@
 | `EVENT_HEALTH_NOTIFY` | `0` | `1` で通知 | チャンネルに警告を表示 |
 | `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` | `600` | 通知抑制 | 通知スパム防止 |
 | `PROMPT_CACHE_TTL_SEC` | `3600` | プロンプトキャッシュ | メモリ肥大防止 |
-| `CHANNEL_IDLE_NOTIFY_SEC` | `1800` | アイドル通知間隔 | 無反応チャンネルへの定期通知 |
+| `CHANNEL_IDLE_NOTIFY_SEC` | `0` | アイドル通知間隔 | 無反応チャンネルへの定期通知（`0` で無効、正の値で opt-in） |
 | `CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` | `1800` | アイドル通知抑制 | 通知スパム防止 |
 | `PERMISSION_WATCH_SEC` | `120` | 承認待ち監視時間 | 承認要求をSlackへ可視化するため |
 | `PERMISSION_WATCH_INTERVAL_SEC` | `2` | 監視間隔 | 負荷と反応速度のバランス |
@@ -102,10 +102,10 @@
 
 ```
 num	channel_name	pane	pane_id	dir
-1	ai-studio-01	1:1.0	%1	/Users/you/WORKSPACE/ai-studio-01
-2	ai-studio-02	1:2.0	%2	/Users/you/WORKSPACE/ai-studio-02
-3	ai-studio-03	1:3.0	%3	/Users/you/WORKSPACE/ai-studio-03
-4	project-x	2:0.0	%4	/Users/you/WORKSPACE/project-x
+1	ai-studio-01	1:1.0	%1	/home/user/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	%2	/home/user/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	%3	/home/user/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	%4	/home/user/WORKSPACE/project-x
 ```
 
 #### 4.4.2 `rm` の例
@@ -218,7 +218,7 @@ python goslack.py rm 4
 ### 9.3 通知
 - `EVENT_HEALTH_NOTIFY=1` の場合、イベント停止チャンネルに通知。
 - 通知は `EVENT_HEALTH_NOTIFY_COOLDOWN_SEC` で抑制。
-- `CHANNEL_IDLE_NOTIFY_SEC` が有効な場合、無反応チャンネルに定期通知（`CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` で抑制）。
+- `CHANNEL_IDLE_NOTIFY_SEC` がデフォルト `0`（無効）。正の値を設定すると無反応チャンネルに定期通知（`CHANNEL_IDLE_NOTIFY_COOLDOWN_SEC` で抑制）。
 
 ### 9.4 重複検知
 - 同一 tmux ペインが複数チャンネルに紐づいている場合、定期的に検出して重複を解消する。
@@ -265,12 +265,12 @@ python goslack.py rm 4
 ### 13.1 `/sessions`
 
 ```
-- ai-studio-01 → /Users/you/WORKSPACE/ai-studio-01
-- project-x → /Users/you/WORKSPACE/project-x
+- ai-studio-01 → /home/user/WORKSPACE/ai-studio-01
+- project-x → /home/user/WORKSPACE/project-x
 ```
 
 ### 13.2 `/dir`
 
 ```
-📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
+📁 接続中のディレクトリ: /home/user/WORKSPACE/project-x
 ```

@@ -1,0 +1,23 @@
+{
+  "repo_id": "slack-tmux-bridge",
+  "package_manager": "pip",
+  "doc_roots": ["docs"],
+  "commands": {
+    "install": "pip install -r requirements.txt",
+    "install_dev": "pip install -r requirements-dev.txt",
+    "run": "python slack_tmux_bridge.py",
+    "test": "pytest",
+    "register_pane": "python goslack.py",
+    "list_sessions": "python goslack.py list",
+    "remove_session": "python goslack.py rm <number>"
+  },
+  "primary_docs": {
+    "investigation": "docs/L3_implementation/specification_summary.md",
+    "structure": "docs/L1_project/repository_structure.md"
+  },
+  "runtime": {
+    "language": "python",
+    "version": "3.11",
+    "entry_point": "slack_tmux_bridge.py"
+  }
+}

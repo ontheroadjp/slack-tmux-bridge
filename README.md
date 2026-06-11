@@ -18,6 +18,15 @@ This project bridges Slack and a persistent Gemini CLI session running inside `t
 - **Duplicate cleanup**: Periodically detects duplicate pane mappings and disconnects the older one with a notice.
 - **Mismatch guard**: If a pane changes, the bridge prompts before sending and can update or disconnect.
 
+## Design Principles
+
+- **Safety first**: Command allowlist + denylist blocks dangerous operations before they reach tmux. `rm` is blocked by default.
+- **Continuity**: tmux sessions persist context across connections. `active_sessions.json` keeps the channel ↔ pane mapping across restarts.
+- **UX safety**: Numeric input executes immediately; text input requires an explicit "Execute (Enter)" button to prevent accidental sends.
+- **Observability**: Health workers detect stalled event streams and can log, exit, or self-restart. Idle-ping notifies per-channel inactivity.
+- **No external exposure**: Slack Socket Mode requires no public HTTP endpoint. The notify ingress is localhost-only.
+- **Single-file deployment**: All bridge logic lives in `slack_tmux_bridge.py` to keep deployment simple.
+
 ## Requirements
 
 - Python 3.x
@@ -106,10 +115,10 @@ Example (`goslack.py list`):
 
 ```
 num	channel_name	pane	pane_id	dir
-1	ai-studio-01	1:1.0	%1	/Users/you/WORKSPACE/ai-studio-01
-2	ai-studio-02	1:2.0	%2	/Users/you/WORKSPACE/ai-studio-02
-3	ai-studio-03	1:3.0	%3	/Users/you/WORKSPACE/ai-studio-03
-4	project-x	2:0.0	%4	/Users/you/WORKSPACE/project-x
+1	ai-studio-01	1:1.0	%1	$HOME/WORKSPACE/ai-studio-01
+2	ai-studio-02	1:2.0	%2	$HOME/WORKSPACE/ai-studio-02
+3	ai-studio-03	1:3.0	%3	$HOME/WORKSPACE/ai-studio-03
+4	project-x	2:0.0	%4	$HOME/WORKSPACE/project-x
 ```
 
 Example removal:
@@ -145,16 +154,16 @@ This repo includes a ready plist at `launchd/com.slack_tmux_bridge.plist`. Copy 
     <string>/usr/bin/env</string>
     <string>TMUX_BIN=/usr/local/bin/tmux</string>
     <string>python3</string>
-    <string>/Users/you/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py</string>
+    <string>$HOME/WORKSPACE/slack_tmux_bridge/slack_tmux_bridge.py</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/you/Library/Logs/slack_tmux_bridge.log</string>
+  <string>$HOME/Library/Logs/slack_tmux_bridge.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/you/Library/Logs/slack_tmux_bridge.log</string>
+  <string>$HOME/Library/Logs/slack_tmux_bridge.log</string>
 </dict>
 </plist>
 ```
@@ -300,12 +309,12 @@ Notify payload contract, ingress transport (`http`/`uds`), queue/retry behavior,
 Example (`/sessions` output):
 
 ```
-- ai-studio-01 → /Users/you/WORKSPACE/ai-studio-01
-- project-x → /Users/you/WORKSPACE/project-x
+- ai-studio-01 → $HOME/WORKSPACE/ai-studio-01
+- project-x → $HOME/WORKSPACE/project-x
 ```
 
 Example (`/dir` output):
 
 ```
-📁 接続中のディレクトリ: /Users/you/WORKSPACE/project-x
+📁 接続中のディレクトリ: $HOME/WORKSPACE/project-x
 ```

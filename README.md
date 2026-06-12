@@ -299,9 +299,40 @@ codex() {
 }
 ```
 
-### Codex notify integration
+### Stop hook integration (Claude Code & Codex)
 
-Codex can call `slack_tmux_bridge.py notify` after each turn.  
+`hooks/notify_on_stop.py` is a unified stop hook for both Claude Code and Codex CLI.
+It reads the hook payload from stdin and forwards the last assistant message to the
+notify ingress automatically at the end of every agent turn.
+
+**Claude Code** — add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/slack-tmux-bridge/hooks/notify_on_stop.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Then set `EXECUTE_RESULT_MODE=notify` (or `both`) in `.env` to disable tmux polling.
+
+**Codex CLI** — add to `~/.codex/config.toml`:
+
+```toml
+notify = ["python3", "/path/to/slack-tmux-bridge/hooks/notify_on_stop.py"]
+```
+
 Notify payload contract, ingress transport (`http`/`uds`), queue/retry behavior, and failure handling are documented in:
 
 - `docs/L2_development/notify_design.md`

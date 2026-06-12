@@ -148,7 +148,8 @@ def test_accept_notify_payload_rejects_when_destination_missing(monkeypatch):
     assert accepted is False
     assert reason == "inactive session for pane_id"
 
-def test_accept_notify_payload_rejects_when_thread_missing(tmp_path, monkeypatch):
+def test_accept_notify_payload_accepts_without_thread_ts(tmp_path, monkeypatch):
+    # thread_ts が解決できなくても channel_id が解決できればキューに入る（トップレベル投稿）
     _reset_ingress_state()
     sessions_path = tmp_path / "active_sessions.json"
     notify_context_path = tmp_path / "tmp" / "notify_context.json"
@@ -166,10 +167,12 @@ def test_accept_notify_payload_rejects_when_thread_missing(tmp_path, monkeypatch
         source="test",
     )
 
-    assert accepted is False
-    assert reason == "thread destination not found"
+    assert accepted is True
+    assert reason == ""
     state = stb._load_notify_queue()
-    assert state["items"] == []
+    assert len(state["items"]) == 1
+    assert state["items"][0]["channel_id"] == "C1"
+    assert state["items"][0]["thread_ts"] is None
 
 
 def test_accept_notify_payload_rejects_by_rate_limit(monkeypatch):
@@ -662,12 +665,21 @@ def test_run_notify_cli_ignores_non_slack_thread_id_and_uses_context(tmp_path, m
     assert "thread-id" in payload
 
 
-def test_run_notify_cli_rejects_when_thread_ts_missing_after_normalization(monkeypatch, capsys):
+def test_run_notify_cli_forwards_without_thread_ts(monkeypatch, capsys):
+    # thread_ts がなくても channel_id があれば転送を試みる（トップレベル投稿）
     monkeypatch.delenv("TMUX_PANE", raising=False)
+    captured = {}
+
+    def _forward(raw):
+        captured["payload"] = raw
+        return True, ""
+
+    monkeypatch.setattr(stb, "_forward_notify_payload", _forward)
     rc = stb.run_notify_cli('{"channel-id":"C123","last-assistant-message":"done"}')
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "missing required field: thread_ts" in out
+    assert rc == 0
+    payload = stb.json.loads(captured["payload"])
+    assert payload["channel_id"] == "C123"
+    assert "thread_ts" not in payload
 
 
 def test_run_notify_cli_rejects_when_last_assistant_message_missing(capsys):

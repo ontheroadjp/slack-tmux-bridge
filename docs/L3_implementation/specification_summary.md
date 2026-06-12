@@ -18,6 +18,7 @@ Evidence:
 - goslack.py:164-205
 - goslack.py:245-359
 - send_enter.sh:1-8
+- hooks/notify_on_stop.py:1-117
 
 # 実装全体像（何をするか / なぜそうするか）
 本リポジトリは、Slack から tmux 上の Gemini CLI に入力を送り、同じスレッドで結果を確認できる運用を実現する。外部公開不要な Socket Mode で Slack イベントを受け、チャンネルと tmux ペインの対応表を維持することで、1チャンネル⇔1ペインの誤送信を避ける。根拠: README.md:1-18 / goslack.py:245-359
@@ -26,6 +27,7 @@ Evidence:
 - `slack_tmux_bridge.py`: Slack イベント受信、コマンドフィルタ、tmux 入力/実行、出力取得、監視を担当。根拠: slack_tmux_bridge.py:150-310,516-583,640-685,892-972
 - `goslack.py`: チャンネル↔ペインの対応表 (active_sessions.json) を登録/更新/一覧/削除する。根拠: goslack.py
 - `send_enter.sh`: tmux に Enter を送信するヘルパ。根拠: send_enter.sh:1-8
+- `hooks/notify_on_stop.py`: Claude Code / Codex CLI 兼用の stop hook。stdin の hook payload を読み取り、最後の assistant メッセージを `slack_tmux_bridge.py notify` 経由で Slack スレッドへ転送する。`transcript_path` キーの有無で Claude Code モード（transcript JSONL から抽出）と Codex モード（payload pass-through）を自動判別する。根拠: hooks/notify_on_stop.py:1-117
 - `active_sessions.json`: チャンネルID→pane_id/pane/dir/name のマッピング。根拠: goslack.py:267-283
 
 # チャンネルとペインの対応管理（goslack.py）
@@ -47,7 +49,7 @@ Evidence:
 
 # 返信の取り扱い
 - `EXECUTE_RESULT_MODE=poll` は監視スナップショットを投稿し、`notify` は監視投稿を行わない。`both` は notify 優先で、notify が同一 `pane_id/thread_ts` に到達した場合は poll 投稿を抑止する。根拠: slack_tmux_bridge.py, goslack.py
-- `/now` と「▶︎ 実行（Enter）」は tmux 出力の変化を監視し、停止後に出力を返信する（タイムアウト時は継続ボタン）。「👀 Geminiを見る」は単発取得して返信する。根拠: slack_tmux_bridge.py
+- `/now` は `EXECUTE_RESULT_MODE` に依存する: `poll`/`both` モードでは tmux 出力の変化を監視し停止後に返信する（タイムアウト時は継続ボタン）。`notify` モードでは単発スナップショットを即時投稿する。「▶︎ 実行（Enter）」は `poll`/`both` 時のみ監視を起動する。「👀 Geminiを見る」は常に単発取得して返信する。根拠: slack_tmux_bridge.py
 - `permission` / `/now` / `execute` の監視起動は、同一 `thread_ts` で同種監視が起動中なら重複起動を抑止する。根拠: slack_tmux_bridge.py
 - local notify ingress 受信分は配送キューに永続化され、Slack 投稿失敗時は backoff 付き再試行を行う。TTL 超過や試行上限到達時は破棄して失敗理由をログに残す。`invalid_thread_ts` / `channel_not_found` / `not_in_channel` / `is_archived` は恒久エラーとして即時破棄する。`NOTIFY_QUEUE_RESET_ON_START` の既定値は `0` で、`1` を設定した場合のみ起動時キュー初期化を行う。根拠: slack_tmux_bridge.py
 - notify 配送ワーカーは、キュー走査/状態反映をロック内で行い、Slack 投稿（外部I/O）はロック外で処理する。根拠: slack_tmux_bridge.py

@@ -698,8 +698,6 @@ def _validate_notify_payload_for_thread_reply(payload: dict):
     channel_id, thread_ts = _resolve_notify_destination(payload)
     if not isinstance(channel_id, str) or not channel_id.strip():
         return False, "missing required field: channel_id"
-    if not isinstance(thread_ts, str) or not thread_ts.strip():
-        return False, "missing required field: thread_ts"
     return True, ""
 
 def run_notify_cli(payload_arg: str) -> int:
@@ -876,12 +874,7 @@ def _accept_notify_payload(payload: dict, source: str):
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "destination not found"
         return False, "destination not found"
-    if not isinstance(thread_ts, str) or not thread_ts.strip():
-        with NOTIFY_INGRESS_LOCK:
-            NOTIFY_INGRESS_STATE["rejected"] += 1
-            NOTIFY_INGRESS_STATE["last_error"] = "thread destination not found"
-        return False, "thread destination not found"
-    if not _is_valid_slack_thread_ts(thread_ts):
+    if thread_ts and not _is_valid_slack_thread_ts(thread_ts):
         with NOTIFY_INGRESS_LOCK:
             NOTIFY_INGRESS_STATE["rejected"] += 1
             NOTIFY_INGRESS_STATE["last_error"] = "invalid thread_ts"
@@ -1941,7 +1934,15 @@ def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bo
         "🔄 現在の状態を取得しています...",
         thread_ts=thread_ts
     )
-    _start_now_watch(thread_ts, channel_id, tmux_target)
+    if EXECUTE_RESULT_MODE in ("poll", "both"):
+        _start_now_watch(thread_ts, channel_id, tmux_target)
+    else:
+        out = capture_tmux(tmux_target).strip()
+        _post_message(
+            channel_id,
+            "```" + (out[-3500:] if out else "(no output)") + "```",
+            thread_ts=thread_ts,
+        )
     return True
 
 def _handle_ctlc_command(channel_id: str, thread_ts: str, tmux_target: str) -> bool:

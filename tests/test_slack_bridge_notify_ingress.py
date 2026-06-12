@@ -109,18 +109,12 @@ def test_accept_notify_payload_queues_with_explicit_destination(tmp_path, monkey
 def test_accept_notify_payload_resolves_destination_by_pane_id(tmp_path, monkeypatch):
     _reset_ingress_state()
     sessions_path = tmp_path / "active_sessions.json"
-    notify_context_path = tmp_path / "tmp" / "notify_context.json"
     queue_path = tmp_path / "tmp" / "notify_delivery_queue.json"
     monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
-    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
     monkeypatch.setattr(stb, "NOTIFY_QUEUE_FILE", str(queue_path))
     stb._atomic_write_json(
         str(sessions_path),
-        {"C9": {"pane_id": "%9", "pane": "1:9.0", "dir": "/tmp/z", "name": "chan-z"}},
-    )
-    stb._atomic_write_json(
-        str(notify_context_path),
-        {"%9": {"channel_id": "C9", "thread_ts": "9.999", "updated_at": time.time()}},
+        {"C9": {"pane_id": "%9", "pane": "1:9.0", "dir": "/tmp/z", "name": "chan-z", "thread_ts": "9.999"}},
     )
 
     accepted, reason = stb._accept_notify_payload(
@@ -609,17 +603,11 @@ def test_run_notify_cli_resolves_channel_and_thread_by_pane_id(tmp_path, monkeyp
 def test_run_notify_cli_resolves_destination_by_tmux_pane_env(tmp_path, monkeypatch):
     captured = {}
     sessions_path = tmp_path / "active_sessions.json"
-    notify_context_path = tmp_path / "tmp" / "notify_context.json"
     monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
-    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
     monkeypatch.setenv("TMUX_PANE", "%1")
     stb._atomic_write_json(
         str(sessions_path),
-        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
-    )
-    stb._atomic_write_json(
-        str(notify_context_path),
-        {"%1": {"channel_id": "C1", "thread_ts": "123.456", "updated_at": time.time()}},
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a", "thread_ts": "123.456"}},
     )
 
     def _forward(raw):
@@ -634,20 +622,14 @@ def test_run_notify_cli_resolves_destination_by_tmux_pane_env(tmp_path, monkeypa
     assert payload["thread_ts"] == "123.456"
 
 
-def test_run_notify_cli_ignores_non_slack_thread_id_and_uses_context(tmp_path, monkeypatch):
+def test_run_notify_cli_ignores_non_slack_thread_id_and_uses_active_sessions(tmp_path, monkeypatch):
     captured = {}
     sessions_path = tmp_path / "active_sessions.json"
-    notify_context_path = tmp_path / "tmp" / "notify_context.json"
     monkeypatch.setattr(stb, "ACTIVE_SESSIONS_FILE", str(sessions_path))
-    monkeypatch.setattr(stb, "NOTIFY_CONTEXT_FILE", str(notify_context_path))
     monkeypatch.setenv("TMUX_PANE", "%1")
     stb._atomic_write_json(
         str(sessions_path),
-        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a"}},
-    )
-    stb._atomic_write_json(
-        str(notify_context_path),
-        {"%1": {"channel_id": "C1", "thread_ts": "123.456", "updated_at": time.time()}},
+        {"C1": {"pane_id": "%1", "pane": "1:1.0", "dir": "/tmp/a", "name": "chan-a", "thread_ts": "123.456"}},
     )
 
     def _forward(raw):

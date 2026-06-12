@@ -35,6 +35,8 @@ import sys
 from notify_common import bridge_path as _bridge_path
 from notify_common import call_notify as _call_notify_impl
 from notify_common import make_log_func
+from notify_common import save_pane_snapshot
+from notify_common import tmp_dir as _tmp_dir
 
 _log = make_log_func(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "notify_on_stop.log"))
 
@@ -92,6 +94,8 @@ def main() -> None:
         _log(f"bridge not found: {bridge}")
         sys.exit(0)
 
+    pane_id = os.environ.get("TMUX_PANE", "")
+
     transcript_path = payload.get("transcript_path", "")
     if transcript_path:
         # Claude Code mode: extract last assistant message from transcript
@@ -109,6 +113,7 @@ def main() -> None:
             sys.exit(0)
         _call_notify(raw.strip(), bridge)
 
+    save_pane_snapshot(pane_id, _tmp_dir(), _log)
     sys.exit(0)
 
 

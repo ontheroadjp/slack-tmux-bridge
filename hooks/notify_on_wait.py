@@ -21,7 +21,9 @@ import sys
 
 from notify_common import bridge_path as _bridge_path
 from notify_common import call_notify as _call_notify_impl
+from notify_common import capture_pane_since_last
 from notify_common import make_log_func
+from notify_common import tmp_dir as _tmp_dir
 
 _log = make_log_func(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "notify_on_wait.log"))
 
@@ -51,10 +53,15 @@ def main() -> None:
         _log("no message in payload, exit")
         sys.exit(0)
 
-    notify_payload = json.dumps(
-        {"last-assistant-message": f"[permission/input needed]\n{message}"},
-        ensure_ascii=False,
-    )
+    pane_id = os.environ.get("TMUX_PANE", "")
+    pane_content = capture_pane_since_last(pane_id, _tmp_dir(), _log)
+
+    if pane_content:
+        full_message = f"{pane_content}\n\n[permission/input needed]\n{message}"
+    else:
+        full_message = f"[permission/input needed]\n{message}"
+
+    notify_payload = json.dumps({"last-assistant-message": full_message}, ensure_ascii=False)
     _call_notify(notify_payload, bridge)
     sys.exit(0)
 

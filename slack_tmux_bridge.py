@@ -806,7 +806,11 @@ def _resolve_notify_destination(payload: dict):
                         continue
                     if value.get("pane_id") == pane_id:
                         channel_id = ch_id
+                        if not thread_ts:
+                            thread_ts = value.get("thread_ts")
                         break
+        if channel_id:
+            return channel_id, thread_ts
         ctx = context.get(pane_id) if isinstance(context, dict) else None
         if isinstance(ctx, dict):
             if not channel_id:

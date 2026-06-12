@@ -123,17 +123,17 @@ def _get_slack_client():
     return WebClient(token=SLACK_BOT_TOKEN)
 
 def send_slack_message(channel, text, thread_ts=None):
-    """Sends a message to Slack using WebClient"""
+    """Sends a message to Slack using WebClient. Returns ts of posted message or None."""
     try:
         client = _get_slack_client()
         kwargs = {"channel": channel, "text": text}
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
-        client.chat_postMessage(**kwargs)
-        return True
+        resp = client.chat_postMessage(**kwargs)
+        return resp.get("ts")
     except Exception as e:
         print(f"⚠️ Warning: Failed to send Slack message: {e}")
-        return False
+        return None
 
 def _find_channel_by_name(client, name):
     cursor = None
@@ -291,7 +291,7 @@ def _resolve_channel_by_name(client, channel_name):
         return None
     return _find_channel_by_name(client, channel_name)
 
-def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=None):
+def _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=None, thread_ts=None):
     active_sessions = load_json(ACTIVE_SESSIONS_FILE)
     pane_keys = {pane_id, pane_target}
     if pane_aliases:
@@ -304,12 +304,15 @@ def _register_session(target_channel, target_channel_name, pane_id, pane_target,
     for dup in duplicates:
         del active_sessions[dup]
 
-    active_sessions[target_channel] = {
+    entry = {
         "pane": pane_target,
         "pane_id": pane_id,
         "dir": cwd,
-        "name": target_channel_name
+        "name": target_channel_name,
     }
+    if thread_ts:
+        entry["thread_ts"] = thread_ts
+    active_sessions[target_channel] = entry
     save_json(ACTIVE_SESSIONS_FILE, active_sessions)
 
 def main():
@@ -384,16 +387,16 @@ def main():
     else:
         pane_aliases = []
     
-    # 5. Update active sessions
-    _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=pane_aliases)
-    
-    # 6. Send Slack Notification
-    send_slack_message(
+    # 5. Send Slack Notification and capture thread_ts
+    ts = send_slack_message(
         target_channel,
         "✅ マッピングしました。"
         f"\nディレクトリ: {cwd}"
         "\nこのチャンネルからのメッセージはこの tmux ペインに送られます。"
     )
+
+    # 6. Update active sessions
+    _register_session(target_channel, target_channel_name, pane_id, pane_target, cwd, pane_aliases=pane_aliases, thread_ts=ts)
     
     print("✅ Mapped!")
     print(f"Directory: {cwd}")

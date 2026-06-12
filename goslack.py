@@ -21,6 +21,9 @@ AI_STUDIO_CHANNELS = ["ai-studio-01", "ai-studio-02", "ai-studio-03"]
 load_dotenv(DOTENV_PATH)
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
+if os.path.basename(TMUX_BIN) != "tmux":
+    print(f"Error: TMUX_BIN must be 'tmux' or a path ending in 'tmux', got: {TMUX_BIN!r}")
+    sys.exit(1)
 
 def load_json(path):
     if not os.path.exists(path):
@@ -341,11 +344,18 @@ def main():
         list_sessions()
         return
     if args.command == "rm":
-        remove_sessions_by_number(args.number, notify_message=args.notify)
+        notify_msg = args.notify
+        if notify_msg and len(notify_msg) > 3000:
+            print("Error: --notify message exceeds 3000 characters.")
+            sys.exit(1)
+        remove_sessions_by_number(args.number, notify_message=notify_msg)
         return
     # 1. Get current directory (or target pane directory)
     if args.add:
         pane_target = args.add
+        if not _is_valid_tmux_target(pane_target):
+            print(f"Error: Invalid tmux target format: {pane_target!r}. Expected format: session:window.pane (e.g., 1:2.0)")
+            sys.exit(1)
         pane_id = get_tmux_pane_id_from_target(pane_target)
         cwd = get_tmux_pane_cwd(pane_target)
     else:

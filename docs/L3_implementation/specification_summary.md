@@ -28,14 +28,15 @@ Evidence:
 - `goslack.py`: チャンネル↔ペインの対応表 (active_sessions.json) を登録/更新/一覧/削除する。根拠: goslack.py
 - `send_enter.sh`: tmux に Enter を送信するヘルパ。根拠: send_enter.sh:1-8
 - `hooks/notify_on_stop.py`: Claude Code / Codex CLI 兼用の stop hook。stdin の hook payload を読み取り、最後の assistant メッセージを `slack_tmux_bridge.py notify` 経由で Slack スレッドへ転送する。`transcript_path` キーの有無で Claude Code モード（transcript JSONL から抽出）と Codex モード（payload pass-through）を自動判別する。根拠: hooks/notify_on_stop.py:1-117
-- `active_sessions.json`: チャンネルID→pane_id/pane/dir/name のマッピング。根拠: goslack.py:267-283
+- `active_sessions.json`: チャンネルID→pane_id/pane/dir/name/thread_ts のマッピング。`thread_ts` はセッション登録時に投稿した「マッピングしました」メッセージの ts。根拠: goslack.py
 
 # チャンネルとペインの対応管理（goslack.py）
 - 現在のディレクトリ名を Slack チャンネル名として解決し、見つからない場合は `ai-studio-01/02/03` を順にフォールバックする。根拠: README.md:84-113 / goslack.py:245-260
-- `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py:267-283
+- セッション登録時に「マッピングしました」を Slack に投稿し、その `ts` を `thread_ts` として `active_sessions.json` に保存する。以後の通知はこのスレッドに返信される。根拠: goslack.py
+- `pane_id` と `session:window.pane` を保存し、同一ペインの重複登録は削除する。根拠: goslack.py
 - `list` は番号付きでセッションを出力し、`rm <number>` で削除する。根拠: goslack.py:164-205
 - Codex notify payload は `slack_tmux_bridge.py notify` が `NOTIFY_INGRESS_TRANSPORT` (`http`/`uds`) に従って bridge へ転送し、`channel-id`/`pane-id`/`thread-id` を snake_case キー（`channel_id`/`pane_id`/`thread_ts`）へ不足時のみ補完する（`thread-id` は Slack thread ts 形式のみ補完対象）。スレッド返信用途では `last-assistant-message` を必須とし、`channel_id`/`thread_ts` は payload 直値または `pane_id` 起点の宛先解決で確定できる必要がある。解決不能なら forwarding 前に reject する。根拠: slack_tmux_bridge.py
-- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id`（未指定時は条件付きで `TMUX_PANE`）と `active_sessions.json`/`tmp/notify_context.json` から解決する。`pane_id` が未接続なら reject する。`thread_ts` を確定できない payload は reject する。根拠: slack_tmux_bridge.py
+- notify 宛先解決は payload の `channel_id/thread_ts` を優先し、欠落時は `pane_id`（未指定時は条件付きで `TMUX_PANE`）と `active_sessions.json` から解決する。`active_sessions` でチャンネルが解決できた時点で `thread_ts` も同時に取得して即リターンし、`tmp/notify_context.json` は参照しない。`pane_id` が未接続なら reject する。根拠: slack_tmux_bridge.py
 
 # Slack 受信 → tmux 実行
 - Slack message イベントのみ処理し、未接続チャンネルは無視する。根拠: slack_tmux_bridge.py:892-938

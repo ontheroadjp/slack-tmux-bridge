@@ -32,6 +32,18 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
+
+_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "notify_on_stop.log")
+
+
+def _log(msg: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+    except Exception:
+        pass
 
 
 def _bridge_path() -> str:
@@ -67,46 +79,56 @@ def _last_assistant_message(transcript_path: str) -> str:
                     joined = "\n".join(t for t in texts if t)
                     if joined:
                         last = joined
-    except Exception:
-        pass
+    except Exception as e:
+        _log(f"transcript read error: {e}")
     return last or ""
 
 
 def _call_notify(payload_json: str, bridge: str) -> None:
     try:
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, bridge, "notify", "-"],
             input=payload_json,
             text=True,
+            capture_output=True,
             timeout=10,
             check=False,
         )
-    except Exception:
-        pass
+        _log(f"notify returncode={result.returncode} stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}")
+    except Exception as e:
+        _log(f"notify call error: {e}")
 
 
 def main() -> None:
+    _log("hook fired")
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        _log(f"stdin parse error: {e}")
         sys.exit(0)
+
+    _log(f"payload keys={sorted(payload.keys())} TMUX_PANE={os.environ.get('TMUX_PANE','')!r}")
 
     bridge = _bridge_path()
     if not os.path.isfile(bridge):
+        _log(f"bridge not found: {bridge}")
         sys.exit(0)
 
     transcript_path = payload.get("transcript_path", "")
     if transcript_path:
         # Claude Code mode: extract last assistant message from transcript
         msg = _last_assistant_message(transcript_path)
+        _log(f"extracted msg length={len(msg)} transcript={transcript_path!r}")
         if not msg:
+            _log("no assistant text message found in transcript, exit")
             sys.exit(0)
         notify_payload = json.dumps({"last-assistant-message": msg}, ensure_ascii=False)
         _call_notify(notify_payload, bridge)
     else:
         # Codex mode: payload already contains last-assistant-message
         if not payload.get("last-assistant-message"):
+            _log("no last-assistant-message in payload, exit")
             sys.exit(0)
         _call_notify(raw.strip(), bridge)
 

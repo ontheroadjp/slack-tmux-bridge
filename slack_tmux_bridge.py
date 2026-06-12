@@ -1941,7 +1941,15 @@ def _handle_now_command(channel_id: str, thread_ts: str, tmux_target: str) -> bo
         "🔄 現在の状態を取得しています...",
         thread_ts=thread_ts
     )
-    _start_now_watch(thread_ts, channel_id, tmux_target)
+    if EXECUTE_RESULT_MODE in ("poll", "both"):
+        _start_now_watch(thread_ts, channel_id, tmux_target)
+    else:
+        out = capture_tmux(tmux_target).strip()
+        _post_message(
+            channel_id,
+            "```" + (out[-3500:] if out else "(no output)") + "```",
+            thread_ts=thread_ts,
+        )
     return True
 
 def _handle_ctlc_command(channel_id: str, thread_ts: str, tmux_target: str) -> bool:

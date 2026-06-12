@@ -205,7 +205,7 @@ def test_dedupe_prefers_channel_with_name_when_timestamps_equal(tmp_path, monkey
     assert any("chan-b" in text for _, text in messages)
 
 
-def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
+def test_now_command_starts_monitor_in_poll_mode(monkeypatch):
     calls = {"started": False}
     sent = []
 
@@ -217,11 +217,34 @@ def test_now_command_starts_monitor_and_notifies_when_busy(monkeypatch):
 
     monkeypatch.setattr(stb, "_post_message", _post_message)
     monkeypatch.setattr(stb, "_start_now_watch", _start_now_watch)
+    monkeypatch.setattr(stb, "EXECUTE_RESULT_MODE", "poll")
 
     stb._handle_now_command("C1", "thread1", "1:1.0")
 
     assert any("取得しています" in text for _, text in sent)
     assert calls["started"] is True
+
+
+def test_now_command_posts_snapshot_in_notify_mode(monkeypatch):
+    sent = []
+    calls = {"started": False}
+
+    def _post_message(channel, text, thread_ts=None, blocks=None):
+        sent.append((channel, text))
+
+    def _start_now_watch(thread_ts, channel_id, tmux_target):
+        calls["started"] = True
+
+    monkeypatch.setattr(stb, "_post_message", _post_message)
+    monkeypatch.setattr(stb, "_start_now_watch", _start_now_watch)
+    monkeypatch.setattr(stb, "capture_tmux", lambda target: "tmux output")
+    monkeypatch.setattr(stb, "EXECUTE_RESULT_MODE", "notify")
+
+    stb._handle_now_command("C1", "thread1", "1:1.0")
+
+    assert any("取得しています" in text for _, text in sent)
+    assert any("tmux output" in text for _, text in sent)
+    assert calls["started"] is False
 
 
 def test_now_command_errors_without_session(monkeypatch):

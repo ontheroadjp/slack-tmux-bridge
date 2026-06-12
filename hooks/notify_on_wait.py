@@ -17,40 +17,17 @@ Registration (~/.claude/settings.json):
 
 import json
 import os
-import subprocess
 import sys
-from datetime import datetime
 
-_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "notify_on_wait.log")
+from notify_common import bridge_path as _bridge_path
+from notify_common import call_notify as _call_notify_impl
+from notify_common import make_log_func
 
-
-def _log(msg: str) -> None:
-    try:
-        os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
-        with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
-    except Exception:
-        pass
-
-
-def _bridge_path() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "..", "slack_tmux_bridge.py")
+_log = make_log_func(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "notify_on_wait.log"))
 
 
 def _call_notify(payload_json: str, bridge: str) -> None:
-    try:
-        result = subprocess.run(
-            [sys.executable, bridge, "notify", "-"],
-            input=payload_json,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-        _log(f"notify returncode={result.returncode} stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}")
-    except Exception as e:
-        _log(f"notify call error: {e}")
+    _call_notify_impl(payload_json, bridge, _log)
 
 
 def main() -> None:
